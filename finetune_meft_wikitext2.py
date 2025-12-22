@@ -38,7 +38,7 @@ from trl import SFTTrainer,SFTConfig
 import argparse
 
 print("login to huggingface_hub")
-huggingface_hub.login(token="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")  # Replace with your actual token
+huggingface_hub.login(token="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")  # Replace with your actual token
 print("login success")
 
 
@@ -69,6 +69,7 @@ def parse_args():
     parser.add_argument("--using_meft", action="store_true",default=False,help="whether to use mefttrainer")
     parser.add_argument("--using_compress", action="store_true",default=False,help="whether to use compress")
     parser.add_argument("--compress_rank", type=float, default=0.125,help="the ratio of compressing")
+    parser.add_argument("--compress_method", type=str, default="rqb",help="the method of compressing")
     parser.add_argument("--patch_locations",type=int,default=1,help="the location of patching,1 means ('ckpt_layer',),and 2 means (norm, ckpt_attn, ckpt_mlp,)")
     return parser.parse_args()
 
@@ -221,7 +222,7 @@ def main(args):
             # compute_metrics=compute_metrics,
             meft_config=MeftConfig(
                 patch_locations=meft_patch_locations, # ("norm", "ckpt_attn", "ckpt_mlp",), # patch_locations=("ckpt_layer",),   
-                compress_kwargs={"rank": args.compress_rank} if args.using_compress else None,
+                compress_kwargs={"rank": args.compress_rank, "method": args.compress_method} if args.using_compress else None,
             ),
             callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)] if args.early_stopping else None,
         )
