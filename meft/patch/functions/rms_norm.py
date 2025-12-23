@@ -1,7 +1,7 @@
 from torch import nn, Tensor
 import transformers
 
-from ...ops.rms_norm import RMSNormFunction
+from ...ops.rms_norm import RMSNormFunction, RMSNormFunction_LowrankPlusQuantization
 from ...ops.utils import CastingMode
 
 
@@ -79,6 +79,23 @@ def t5_rms_norm_forward(
     compress_kwargs: dict | None = None,
 ) -> Tensor:
     output = RMSNormFunction.apply(
+        hidden_states,
+        None,
+        self.weight,
+        self.variance_epsilon,
+        CastingMode.INPUT,
+        compress_kwargs if self.training else None,
+    )
+    output, _ = output
+    return output
+
+
+def t5_rms_norm_forward_lowrank_plus_quantization(
+    self: "transformers.models.t5.modeling_t5.T5LayerNorm",
+    hidden_states: Tensor,
+    compress_kwargs: dict | None = None,
+) -> Tensor:
+    output = RMSNormFunction_LowrankPlusQuantization.apply(
         hidden_states,
         None,
         self.weight,

@@ -61,6 +61,7 @@ class LowRankDecomposedTensor(CompressedTensor):
     @staticmethod
     def compress(tensor: Tensor, **kwargs) -> tuple[Tensor, ...]:
         method = kwargs.pop("method")
+        lowrank_plus_quantizatio = kwargs.pop("lowrank_plus_quantization", False)
         compress_func = LOWRANK_COMPRESS_FUNC_MAPPING[method]
         tensor = tensor.flatten(0, -2)  # (*l, m, n) -> (lm, n)
         factors = compress_func(tensor, **kwargs)  # (lm, n) -> ...

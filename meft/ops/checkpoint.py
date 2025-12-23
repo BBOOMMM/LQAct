@@ -288,8 +288,9 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
         ctx.tensor_keys.append(None)
         if compress_kwargs is not None:
             LowRank = CompressedTensor(hidden_states, **compress_kwargs)
-            Q, B = LowRank.factors
-            R = hidden_states - (Q @ B)
+            # Q, B = LowRank.factors
+            # R = hidden_states - (Q @ B)
+            R = hidden_states - LowRank.reconstruct()
             quant_state = bitsandbytes.functional.quantize_4bit(
                 R,
                 quant_type="nf4",  # 指定 NF4 格式（适配正态分布的 R）

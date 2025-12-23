@@ -38,8 +38,22 @@ from trl import SFTTrainer,SFTConfig
 import argparse
 
 print("login to huggingface_hub")
-huggingface_hub.login(token="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")  # Replace with your actual token
+huggingface_hub.login(token="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")  # Replace with your actual token
 print("login success")
+
+
+import random
+import numpy as np
+from transformers import set_seed as hf_set_seed
+seed = 42
+os.environ["PYTHONHASHSEED"] = str(seed)
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+hf_set_seed(seed)  # transformers 内部用到的随机也统一
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 
 def train(
@@ -79,6 +93,7 @@ def train(
     # Meft params
     using_meft: bool = True,
     using_compress: bool = True,
+    lowrank_plus_quantization: bool = False,
     compress_rank: float = 0.0625,
     patch_locations: int = 1,  # ("norm","ckpt_attn","ckpt_mlp")  
     early_stopping: bool = False,
@@ -103,6 +118,7 @@ def train(
                     f"lora_weights_output_dir: {lora_weights_output_dir}\n"
                     f"hf_ckpt_output_dir: {hf_ckpt_output_dir}\n"
                     f"using_meft: {using_meft}\n"
+                    f"lowrank_plus_quantization: {lowrank_plus_quantization}\n"
                     f"compress_rank: {compress_rank}\n"
                     f"patch_locations: {meft_patch_locations}\n"
                     f"early_stopping: {early_stopping}\n"
@@ -430,7 +446,10 @@ def train(
             # compute_metrics=compute_metrics,
             meft_config=MeftConfig(
                 patch_locations=meft_patch_locations, # ("norm", "ckpt_attn", "ckpt_mlp",), # patch_locations=("ckpt_layer",),   
-                compress_kwargs={"rank": compress_rank} if using_compress else None,
+                compress_kwargs={"rank": compress_rank,
+                                 "method": "rqb",
+                                 "lowrank_plus_quantization": lowrank_plus_quantization,
+                                 } if using_compress else None,
             ),
             callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)] if early_stopping else None,
         )
@@ -526,6 +545,7 @@ def parse_args():
     
     parser.add_argument("--using_meft", action="store_true", default=False, help="Whether to use MEFT")
     parser.add_argument("--using_compress",action="store_true",default=False, help="Whether to use compression in MEFT")
+    parser.add_argument("--lowrank_plus_quantization", action="store_true", default=False, help="Whether to use low-rank plus quantization in MEFT")
     parser.add_argument("--compress_rank", type=float, default=0.0625, help="Compression rank for MEFT")
     parser.add_argument("--patch_locations", type=int, default=1, help="Locations to apply MEFT patches, e.g. 2 means ('norm', 'ckpt_attn', 'ckpt_mlp') 1 means ('ckpt_layer',)")
 
@@ -569,6 +589,7 @@ if __name__ == "__main__":
         patch_locations=args.patch_locations,
         using_meft=args.using_meft,
         using_compress=args.using_compress,
+        lowrank_plus_quantization=args.lowrank_plus_quantization,
         compress_rank=args.compress_rank,
         early_stopping=args.early_stopping,
         early_stopping_patience=args.early_stopping_patience,

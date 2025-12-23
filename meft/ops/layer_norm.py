@@ -174,8 +174,9 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
         ctx.casting_mode = casting_mode
         if compress_kwargs is not None:
             LowRank = CompressedTensor(output, **compress_kwargs)
-            Q, B = LowRank.factors
-            R = output - (Q @ B)
+            # Q, B = LowRank.factors
+            # R = output - (Q @ B)
+            R = output - LowRank.reconstruct()
             quant_state = bitsandbytes.functional.quantize_4bit(
                 R,
                 quant_type="nf4",  # 指定 NF4 格式（适配正态分布的 R）
