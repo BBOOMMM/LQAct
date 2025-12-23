@@ -116,7 +116,7 @@ add_eos_token = False
 prompter = Prompter(prompt_template_name)
 data_path = "yahma/alpaca-cleaned"
 val_set_size = 1000
-data_name = data_path
+data_name = "alpaca"
 def tokenize(prompt, add_eos_token=True):
     # there's probably a way to do this with the tokenizer settings
     # but again, gotta move fast
@@ -194,7 +194,7 @@ data_collator=transformers.DataCollatorForSeq2Seq(
 
 eval_dataloader = DataLoader(
     val_data,
-    batch_size=128,
+    batch_size=16,
     shuffle=False,
     collate_fn=data_collator,   # 关键：用 collator 做 pad
 )
@@ -268,11 +268,12 @@ with torch.no_grad():
         if step >= 3:
             break
         batch = {k: v.to(device) for k, v in batch.items()}
-        outputs = model(
-            **batch,
-            output_hidden_states=True,  # 额外拿各层 hidden_states
-            return_dict=True,
-        )
+        outputs = model(**batch)
+        # outputs = model(
+        #     **batch,
+        #     output_hidden_states=True,  # 额外拿各层 hidden_states
+        #     return_dict=True,
+        # )
         # outputs.hidden_states: tuple(len = num_layers + 1)
         #   hidden_states[0] 是 embedding 之后的
         #   hidden_states[L+1] 是第 L 层 block 的输出
@@ -283,8 +284,16 @@ for h in handles:
 
 
 # Save activations to disk
+# defaultdict -> 普通 dict，去掉 default_factory
+activations_to_save = {
+    layer_name: {
+        io_type: tensors   # 这里还是 list[Tensor]，后面读取时再自己处理
+        for io_type, tensors in io_dict.items()
+    }
+    for layer_name, io_dict in activations.items()
+}
+
 import pickle
 with open(f"activations_{data_name}.pkl", "wb") as f:
-    pickle.dump(activations, f)
+    pickle.dump(activations_to_save, f)
 
-breakpoint()
