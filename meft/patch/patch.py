@@ -6,7 +6,7 @@ from functools import partial
 from torch import nn
 from transformers.utils.import_utils import is_peft_available
 
-from .functions import checkpoint, nn_linear_forward
+from .functions import checkpoint, nn_linear_forward, checkpoint_lowrank_plus_quantization
 
 
 def _checkpoint_module(
@@ -14,7 +14,10 @@ def _checkpoint_module(
     compress_kwargs: dict | None = None,
 ) -> None:
     requires_grad = any(param.requires_grad for param in module.parameters())
-    module.forward = MethodType(partial(checkpoint, module.forward.__func__, requires_grad=requires_grad, compress_kwargs=compress_kwargs), module)
+    if compress_kwargs.get("lowrank_plus_quantization", False):
+        module.forward = MethodType(partial(checkpoint_lowrank_plus_quantization, module.forward.__func__, requires_grad=requires_grad, compress_kwargs=compress_kwargs), module)
+    else:
+        module.forward = MethodType(partial(checkpoint, module.forward.__func__, requires_grad=requires_grad, compress_kwargs=compress_kwargs), module)
 
 
 def _patch_module(

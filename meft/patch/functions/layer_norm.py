@@ -1,7 +1,7 @@
 from torch import nn, Tensor
 import transformers
 
-from ...ops.layer_norm import LayerNormFunction
+from ...ops.layer_norm import LayerNormFunction, LayerNormFunction_LowrankPlusQuantization
 from ...ops.utils import CastingMode
 
 
@@ -52,6 +52,24 @@ def olmo_layer_norm_forward(
         None,
         None,
         1e-5,
+        CastingMode.ALL,
+        compress_kwargs if self.training else None,
+    )
+    output, _ = output
+    return output
+
+
+def nn_layer_norm_forward_lowrank_plus_quantization(
+    self: "nn.LayerNorm",
+    input: Tensor,
+    compress_kwargs: dict | None = None,
+) -> Tensor:
+    output = LayerNormFunction_LowrankPlusQuantization.apply(
+        input,
+        self.normalized_shape,
+        self.weight,
+        self.bias,
+        self.eps,
         CastingMode.ALL,
         compress_kwargs if self.training else None,
     )

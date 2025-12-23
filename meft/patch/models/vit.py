@@ -2,7 +2,7 @@ import warnings
 
 import transformers
 
-from ..functions import nn_layer_norm_forward, nn_linear_forward, gelu_forward
+from ..functions import nn_layer_norm_forward, nn_linear_forward, gelu_forward, nn_layer_norm_forward_lowrank_plus_quantization
 from ..patch import _checkpoint_module, _patch_module
 
 
@@ -27,25 +27,49 @@ def apply_patch_to_vit_model(
 
     for layer in base_model.encoder.layer:
         layer: ViTLayer
-        if norm:
-            _patch_module(layer.layernorm_before, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
-            _patch_module(layer.layernorm_after, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
-        if attn_in:
-            _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=compress_kwargs)
-            _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=compress_kwargs)
-            _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=compress_kwargs)
-        if attn_out:
-            _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-        if mlp_in:
-            _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-        if mlp_out:
-            _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-        if act_fn:
-            _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_kwargs=compress_kwargs)
-        if ckpt_attn:
-            _checkpoint_module(layer.attention, compress_kwargs=compress_kwargs)
-        if ckpt_mlp:
-            warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
-            _checkpoint_module(layer.intermediate, compress_kwargs=compress_kwargs)
-        if ckpt_layer:
-            _checkpoint_module(layer, compress_kwargs=compress_kwargs)
+        if not compress_kwargs["lowrank_plus_quantization"]:
+            if norm:
+                _patch_module(layer.layernorm_before, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
+                _patch_module(layer.layernorm_after, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
+            if attn_in:
+                _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=compress_kwargs)
+                _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=compress_kwargs)
+                _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if attn_out:
+                _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if mlp_in:
+                _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if mlp_out:
+                _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if act_fn:
+                _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_kwargs=compress_kwargs)
+            if ckpt_attn:
+                _checkpoint_module(layer.attention, compress_kwargs=compress_kwargs)
+            if ckpt_mlp:
+                warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
+                _checkpoint_module(layer.intermediate, compress_kwargs=compress_kwargs)
+            if ckpt_layer:
+                _checkpoint_module(layer, compress_kwargs=compress_kwargs)
+        else:
+            if norm:
+                _patch_module(layer.layernorm_before, nn_layer_norm_forward_lowrank_plus_quantization, compress_kwargs=compress_kwargs)
+                _patch_module(layer.layernorm_after, nn_layer_norm_forward_lowrank_plus_quantization, compress_kwargs=compress_kwargs)
+            if attn_in:
+                _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=compress_kwargs)
+                _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=compress_kwargs)
+                _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if attn_out:
+                _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if mlp_in:
+                _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if mlp_out:
+                _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if act_fn:
+                _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_kwargs=compress_kwargs)
+            if ckpt_attn:
+                _checkpoint_module(layer.attention, compress_kwargs=compress_kwargs)
+            if ckpt_mlp:
+                warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
+                _checkpoint_module(layer.intermediate, compress_kwargs=compress_kwargs)
+            if ckpt_layer:
+                _checkpoint_module(layer, compress_kwargs=compress_kwargs)

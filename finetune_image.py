@@ -60,6 +60,9 @@ def parse_args():
     parser.add_argument("--using_compress", action="store_true", default=False, help="whether to use compress")
     parser.add_argument("--compress_rank", type=float, default=0.125, help="the ratio of compressing")
     parser.add_argument("--patch_locations", type=int, default=1, help="the location of patching,1 means ('ckpt_layer',),and 2 means (norm, ckpt_attn, ckpt_mlp,)")
+    
+    parser.add_argument("--lowrank_plus_quantization", action="store_true", default=False, help="whether to use lowrank plus quantization")
+    
     return parser.parse_args()
 
 def main(args):
@@ -209,7 +212,11 @@ def main(args):
             compute_metrics=compute_metrics,
             meft_config=MeftConfig(
                 patch_locations=meft_patch_locations,
-                compress_kwargs={"rank": args.compress_rank} if args.using_compress else None,
+                compress_kwargs={"rank": args.compress_rank,
+                                 "method": "rqb",
+                                 "lowrank_plus_quantization": args.lowrank_plus_quantization,
+                                 } 
+                if args.using_compress else None,
             ),
         )
     else:
