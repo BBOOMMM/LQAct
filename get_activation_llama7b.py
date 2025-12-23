@@ -294,6 +294,6 @@ activations_to_save = {
 }
 
 import pickle
-with open(f"activations_{data_name}.pkl", "wb") as f:
+with open(f"activations_save/activations_{data_name}.pkl", "wb") as f:
     pickle.dump(activations_to_save, f)
 

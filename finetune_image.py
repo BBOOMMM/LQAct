@@ -29,7 +29,7 @@ from meft import MeftConfig, MeftTrainer
 import huggingface_hub
 
 print("login to huggingface_hub")
-huggingface_hub.login(token="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")  # Replace with your actual token
+huggingface_hub.login(token="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")  # Replace with your actual token
 print("login success")
 
 def parse_args():
