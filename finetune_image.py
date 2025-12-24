@@ -63,9 +63,25 @@ def parse_args():
     
     parser.add_argument("--lowrank_plus_quantization", action="store_true", default=False, help="whether to use lowrank plus quantization")
     
+    parser.add_argument("--wandb_project", default="", help="Wandb project name for logging")
+    parser.add_argument("--wandb_run_name", type=str, default="", help="Name of wandb run")
+    parser.add_argument("--wandb_watch", type=str, default="", help="Wandb watch setting (false | gradients | all)")
+    parser.add_argument("--wandb_log_model", type=str, default="", help="Wandb log model setting (false | true)")
+    
     return parser.parse_args()
 
 def main(args):
+    use_wandb = len(args.wandb_project) > 0 or (
+        "WANDB_PROJECT" in os.environ and len(os.environ["WANDB_PROJECT"]) > 0
+    )
+    # Only overwrite environ if wandb param passed
+    if len(args.wandb_project) > 0:
+        os.environ["WANDB_PROJECT"] = args.wandb_project
+    if len(args.wandb_watch) > 0:
+        os.environ["WANDB_WATCH"] = args.wandb_watch
+    if len(args.wandb_log_model) > 0:
+        os.environ["WANDB_LOG_MODEL"] = args.wandb_log_model
+    
     if args.patch_locations == 1:
         meft_patch_locations = ("ckpt_layer",)
     elif args.patch_locations == 2:
@@ -188,7 +204,6 @@ def main(args):
         bf16_full_eval=True,
         use_liger_kernel=True,
         logging_steps=10,
-        report_to="none",
         remove_unused_columns=False,
         label_names=["labels"],
         load_best_model_at_end=True,
@@ -198,6 +213,8 @@ def main(args):
         eval_strategy="epoch",
         save_total_limit=3,
         output_dir=args.lora_weights_output_dir,
+        report_to="wandb" if use_wandb else None,
+        run_name=args.wandb_run_name if use_wandb else None,
     )
     
     # 根据参数决定使用MeftTrainer还是普通Trainer

@@ -437,7 +437,7 @@ def train(
                 load_best_model_at_end=True if val_set_size > 0 else False,
                 ddp_find_unused_parameters=False if ddp else None,
                 group_by_length=group_by_length,
-                report_to=None,
+                report_to="wandb" if use_wandb else None,
                 run_name=wandb_run_name if use_wandb else None,
             ),
             # data_collator=transformers.DataCollatorForSeq2Seq(
@@ -455,6 +455,9 @@ def train(
         )
     else:
         print("Using original Trainer")
+
+        # model.gradient_checkpointing_enable()   # 开启梯度检查点
+        
         trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
@@ -483,6 +486,7 @@ def train(
             group_by_length=group_by_length,
             report_to="wandb" if use_wandb else None,
             run_name=wandb_run_name if use_wandb else None,
+            # gradient_checkpointing=True,   # ← 新增这一行
         ),
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
@@ -503,6 +507,11 @@ def train(
 
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
+    # # 这里不要再对“普通 Trainer 分支”的模型做 compile 了
+    # if torch.__version__ >= "2" and sys.platform != "win32":
+    #     if using_meft:
+    #         # 只在 MeftTrainer 分支上使用 compile，避免和 checkpoint 冲突
+    #         model = torch.compile(model)
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
