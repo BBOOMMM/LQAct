@@ -26,6 +26,19 @@ from transformers import (
 
 from meft import MeftConfig, MeftTrainer
 
+import random
+import numpy as np
+from transformers import set_seed as hf_set_seed
+seed = 42
+os.environ["PYTHONHASHSEED"] = str(seed)
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+hf_set_seed(seed)  # transformers 内部用到的随机也统一
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 import huggingface_hub
 
 print("login to huggingface_hub")

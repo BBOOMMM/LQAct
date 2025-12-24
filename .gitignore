@@ -2,6 +2,8 @@ __pycache__/
 
 output/
 
+trainer_output/
+
 activations_save/
 
 wandb/

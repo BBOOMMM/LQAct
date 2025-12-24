@@ -27,7 +27,7 @@ def apply_patch_to_vit_model(
 
     for layer in base_model.encoder.layer:
         layer: ViTLayer
-        if not compress_kwargs["lowrank_plus_quantization"]:
+        if not compress_kwargs.get("lowrank_plus_quantization", False):
             if norm:
                 _patch_module(layer.layernorm_before, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
                 _patch_module(layer.layernorm_after, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
