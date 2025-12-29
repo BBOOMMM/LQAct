@@ -6,6 +6,7 @@ from .utils import CastingMode, get_floating_eps, convert_dtype, promote_dtype
 
 import bitsandbytes
 
+# 这里改为压缩output = input / RMS(input)
 class RMSNormFunction(torch.autograd.Function):
     @torch.compile
     @staticmethod

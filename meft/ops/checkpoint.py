@@ -11,6 +11,8 @@ from ..compressed import CompressedTensor
 
 import bitsandbytes
 
+# CheckpointFunction 存储的是每层的 输入
+
 
 def detach_variable(
     hidden_states: Tensor,

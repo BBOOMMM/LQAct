@@ -31,9 +31,11 @@ def get_vit_rank(model, dataset, batch_size, patch_locations):
 
         for i, layer in enumerate(model.vit.encoder.layer):
             if patch_locations == 1:
+                # meft_patch_locations = ("ckpt_layer",)
                 raise NotImplementedError("Only support patch_locations 2 for ViT")
             
             elif patch_locations == 2:
+                # meft_patch_locations = ("norm", "ckpt_attn", "ckpt_mlp",)
                 pass
             
             else:

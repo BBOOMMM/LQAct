@@ -3,7 +3,7 @@ from torch import Tensor
 
 from ..compressed import CompressedTensor
 
-
+# 压缩的是 input
 class LinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(

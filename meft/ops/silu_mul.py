@@ -3,7 +3,7 @@ from torch import nn, Tensor
 
 from ..compressed import CompressedTensor
 
-
+# 压缩的是 silu激活函数 的 输入 Y_1 = X @ W_gate、 逐元素相乘的另一个Y_2 = X @ W_up
 class SiLUMulFunction(torch.autograd.Function):
     @torch.compile
     @staticmethod
