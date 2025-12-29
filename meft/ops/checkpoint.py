@@ -52,12 +52,16 @@ def detach_variable_LowrankPlusQuantization(
     kwargs: dict,
 ) -> tuple[Tensor, tuple, dict]:
 
-    if isinstance(hidden_states, CompressedTensor):
-        LowRank = hidden_states.reconstruct().detach()
+    # if isinstance(hidden_states, CompressedTensor):
+    #     LowRank = hidden_states.reconstruct().detach()
+    #     quant_state = hidden_states.quant_state
+    #     dequant = bitsandbytes.functional.dequantize_4bit(*quant_state)
+    #     detached_hidden_states = LowRank + dequant
+    #     del LowRank, quant_state, dequant
+    if isinstance(hidden_states, torch.Tensor) and hasattr(hidden_states, "quant_state"):
         quant_state = hidden_states.quant_state
-        dequant = bitsandbytes.functional.dequantize_4bit(*quant_state)
-        detached_hidden_states = LowRank + dequant
-        del LowRank, quant_state, dequant
+        detached_hidden_states = bitsandbytes.functional.dequantize_4bit(*quant_state)
+        del quant_state
     else:
         detached_hidden_states = hidden_states.detach()
     detached_hidden_states.requires_grad = hidden_states.requires_grad
@@ -287,18 +291,29 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
 
         ctx.tensor_keys.append(None)
         if compress_kwargs is not None:
-            LowRank = CompressedTensor(hidden_states, **compress_kwargs)
-            # Q, B = LowRank.factors
-            # R = hidden_states - (Q @ B)
-            R = hidden_states - LowRank.reconstruct()
+            # LowRank = CompressedTensor(hidden_states, **compress_kwargs)
+            # # Q, B = LowRank.factors
+            # # R = hidden_states - (Q @ B)
+            # R = hidden_states - LowRank.reconstruct()
+            # quant_state = bitsandbytes.functional.quantize_4bit(
+            #     R,
+            #     quant_type="nf4",  # 指定 NF4 格式（适配正态分布的 R）
+            #     blocksize=128,      # 必须为 32/64/128/256
+            #     compress_statistics=True
+            # )
+            # LowRank.quant_state = quant_state
+            # saved_tensors.append(LowRank)
+            
+            to_save = torch.empty((), device=hidden_states.device, dtype=hidden_states.dtype)  # 占位符，实际不保存 hidden_states
+            to_save.requires_grad = hidden_states.requires_grad
             quant_state = bitsandbytes.functional.quantize_4bit(
-                R,
-                quant_type="nf4",  # 指定 NF4 格式（适配正态分布的 R）
+                hidden_states,
+                quant_type="fp4",  # 指定 NF4 格式（适配正态分布的 R）
                 blocksize=128,      # 必须为 32/64/128/256
                 compress_statistics=True
             )
-            LowRank.quant_state = quant_state
-            saved_tensors.append(LowRank)
+            to_save.quant_state = quant_state
+            saved_tensors.append(to_save)
         else:
             saved_tensors.append(hidden_states)
 

@@ -156,18 +156,28 @@ class RMSNormFunction_LowrankPlusQuantization(torch.autograd.Function):
         ctx.normalized_shape = normalized_shape
         ctx.casting_mode = casting_mode
         if compress_kwargs is not None:
-            LowRank = CompressedTensor(output, **compress_kwargs)
-            # Q, B = LowRank.factors
-            # R = output - (Q @ B)
-            R = output - LowRank.reconstruct()
+            # LowRank = CompressedTensor(output, **compress_kwargs)
+            # # Q, B = LowRank.factors
+            # # R = output - (Q @ B)
+            # R = output - LowRank.reconstruct()
+            # quant_state = bitsandbytes.functional.quantize_4bit(
+            #     R,
+            #     quant_type="nf4",  # 指定 NF4 格式（适配正态分布的 R）
+            #     blocksize=128,      # 必须为 32/64/128/256
+            #     compress_statistics=True
+            # )
+            # LowRank.quant_state = quant_state
+            # ctx.save_for_backward(LowRank, weight, rstd)
+            
+            to_save = torch.empty((), device=output.device, dtype=output.dtype)  # 占位符，实际不保存 hidden_states
             quant_state = bitsandbytes.functional.quantize_4bit(
-                R,
-                quant_type="nf4",  # 指定 NF4 格式（适配正态分布的 R）
+                output,
+                quant_type="fp4",  # 指定 NF4 格式（适配正态分布的 R）
                 blocksize=128,      # 必须为 32/64/128/256
                 compress_statistics=True
             )
-            LowRank.quant_state = quant_state
-            ctx.save_for_backward(LowRank, weight, rstd)
+            to_save.quant_state = quant_state
+            ctx.save_for_backward(to_save, weight, rstd)
         else:
             ctx.save_for_backward(output, weight, rstd)
 
@@ -180,12 +190,16 @@ class RMSNormFunction_LowrankPlusQuantization(torch.autograd.Function):
             reduction_dim = -1
         output, weight, rstd, = ctx.saved_tensors
 
-        if isinstance(output, CompressedTensor):
-            LowRank = output.reconstruct()
+        # if isinstance(output, CompressedTensor):
+        #     LowRank = output.reconstruct()
+        #     quant_state = output.quant_state
+        #     dequant = bitsandbytes.functional.dequantize_4bit(*quant_state)
+        #     output = LowRank + dequant
+        #     del LowRank, quant_state, dequant
+        if isinstance(output, torch.Tensor) and hasattr(output, "quant_state"):
             quant_state = output.quant_state
-            dequant = bitsandbytes.functional.dequantize_4bit(*quant_state)
-            output = LowRank + dequant
-            del LowRank, quant_state, dequant
+            output = bitsandbytes.functional.dequantize_4bit(*quant_state)
+            del quant_state
 
         input_normalized = output
         if weight is not None:
