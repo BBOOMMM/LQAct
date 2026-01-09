@@ -23,6 +23,8 @@ from trl import SFTConfig, SFTTrainer
 from meft import MeftConfig, MeftTrainer
 import meft
 
+from get_rank.vit import get_vit_rank, get_vit_rank_ratio
+
 import random
 import numpy as np
 from transformers import set_seed as hf_set_seed
@@ -76,6 +78,12 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 
+# _, rank_dict = get_vit_rank(model, dataset["train"], batch_size=512, patch_locations=2)
+rank_dict = get_vit_rank_ratio(model, dataset["train"], batch_size=512, patch_locations=2)
+
+# breakpoint()
+
+
 def compute_metrics(eval_pred: EvalPrediction):
     evaluation = evaluate.load("accuracy")
     logits, labels = eval_pred
@@ -126,7 +134,8 @@ trainer = MeftTrainer[Trainer](
             # "ckpt_layer",
         ),
         compress_kwargs={
-            "rank": 0.0625,
+            # "rank": 0.125,
+            "rank": rank_dict,
             # "niter": 1,
         },
         # compress_workers=2,
