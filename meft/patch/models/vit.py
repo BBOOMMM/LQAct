@@ -96,6 +96,52 @@ def apply_patch_to_vit_model(
 
     class CheckpointViTMLPWarning(UserWarning): ...
     warnings.simplefilter("once", CheckpointViTMLPWarning)
+    
+    if "project_matrixes" in compress_kwargs:
+        print("Applying patch to ViT with project matrixes...")
+        for i in range(len(base_model.encoder.layer)):
+            base_model.encoder.layer : ModuleList
+            layer: ViTLayer = base_model.encoder.layer[i]
+            compress_kwargs_layer_tocopy = {}
+            compress_kwargs_layer_tocopy['project_matrix'] = None
+            if norm:
+                kwargs_layernorm_before = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_layernorm_before['project_matrix'] = compress_kwargs['project_matrixes'][f'layer_{i}.layernorm_before']['output']
+                _patch_module(layer.layernorm_before, nn_layer_norm_forward, compress_kwargs=kwargs_layernorm_before)
+                kwargs_layernorm_after = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_layernorm_after['project_matrix'] = compress_kwargs['project_matrixes'][f'layer_{i}.layernorm_after']['output']
+                _patch_module(layer.layernorm_after, nn_layer_norm_forward, compress_kwargs=kwargs_layernorm_after)
+            if attn_in:
+                raise NotImplementedError
+                # _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=compress_kwargs)
+                # _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=compress_kwargs)
+                # _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if attn_out:
+                raise NotImplementedError
+                # _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if mlp_in:
+                raise NotImplementedError
+                # _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if mlp_out:
+                raise NotImplementedError
+                # _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+            if act_fn:
+                raise NotImplementedError
+                # _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_kwargs=compress_kwargs)
+            if ckpt_attn:
+                kwargs_attention = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_attention['project_matrix'] = compress_kwargs['project_matrixes'][f'layer_{i}.attention']['input']
+                _checkpoint_module(layer.attention, compress_kwargs=kwargs_attention)
+            if ckpt_mlp:
+                warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
+                kwargs_mlp = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_mlp['project_matrix'] = compress_kwargs['project_matrixes'][f'layer_{i}.intermediate']['input']
+                _checkpoint_module(layer.intermediate, compress_kwargs=kwargs_mlp)
+            if ckpt_layer:
+                kwargs_layer = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_layer['project_matrix'] = compress_kwargs['project_matrixes'][f'layer_{i}']['input']
+                _checkpoint_module(layer, compress_kwargs=kwargs_layer)
+        return
 
     if type(compress_kwargs['rank']) is not dict:
         for layer in base_model.encoder.layer:

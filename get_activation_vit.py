@@ -139,7 +139,7 @@ def register_hooks():
             
             # activations[name].append(input.detach().to("cpu"), output.detach().to("cpu"))
             activations[name]['input'].append(x.detach().to("cpu"))
-            activations[name]['output'].append(y.detach().to("cpu"))
+            # activations[name]['output'].append(y.detach().to("cpu"))
         return hook
 
     for i, layer in enumerate(model.vit.encoder.layer):
@@ -192,6 +192,9 @@ activations_to_save = {
     for layer_name, io_dict in activations.items()
 }
 
+
 import pickle
+import os
+os.makedirs("activations_save", exist_ok=True)
 with open(f"activations_save/activations_vit_cifar100.pkl", "wb") as f:
     pickle.dump(activations_to_save, f)

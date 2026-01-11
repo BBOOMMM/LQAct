@@ -2,6 +2,10 @@ import torch
 from torch.utils.data import DataLoader
 from collections import defaultdict
 
+from meft.linalg import *
+
+import time
+
 def get_vit_activations(model, dataset, batch_size, patch_locations):
     device = next(model.parameters()).device
     
@@ -40,8 +44,8 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
             elif patch_locations == 2:
                 # meft_patch_locations = ("norm", "ckpt_attn", "ckpt_mlp",)
                 # 存储 RMSNorm 的输出
-                handles.append(layer.layernorm_before.register_forward_hook(get_hook(f"layer_{i}.layernorm_before", "output")))
-                handles.append(layer.layernorm_after.register_forward_hook(get_hook(f"layer_{i}.layernorm_after", "output")))
+                # handles.append(layer.layernorm_before.register_forward_hook(get_hook(f"layer_{i}.layernorm_before", "output")))
+                # handles.append(layer.layernorm_after.register_forward_hook(get_hook(f"layer_{i}.layernorm_after", "output")))
                 
                 # 存储 attention 块的输入
                 handles.append(layer.attention.register_forward_hook(get_hook(f"layer_{i}.attention", "input")))
@@ -66,13 +70,13 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
     for h in handles:
         h.remove()
         
-    # activations_to_save = {
-    #     layer_name: {
-    #         io_type: tensors   # 这里还是 list[Tensor]，后面读取时再自己处理
-    #         for io_type, tensors in io_dict.items()
-    #     }
-    #     for layer_name, io_dict in activations.items()
-    # }
+    activations = {
+        layer_name: {
+            io_type: tensors   # 这里还是 list[Tensor]，后面读取时再自己处理
+            for io_type, tensors in io_dict.items()
+        }
+        for layer_name, io_dict in activations.items()
+    }
     
     return activations
 
@@ -169,4 +173,71 @@ def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1
     
     # breakpoint()
 
-    return rank_ratio_dict
+    return activations, rank_ratio_dict
+
+
+def get_vit_project_matrix(model, dataset, batch_size, patch_locations, base_ratio=1.0/8.0):
+    activations, rank_dict = get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio)
+    
+    start_time = time.time()
+    
+    project_matrixes = {}
+    for layer_name, io_dict in activations.items():
+        project_matrixes[layer_name] = {}
+        for io_type, tensors in io_dict.items():
+            act = torch.cat(tensors, dim=0)  # [B, S, D]
+            act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
+            rank = rank_dict[layer_name][io_type]
+            
+            # 使用自己的算法
+            Q, _ = randomized_qb(act, rank, left=True)
+            
+            # 或者使用 SVD 得到正交矩阵
+            # U, S, Vh = torch.linalg.svd(act, full_matrices=False)
+            # Q = U[:, :rank]  # [D, rank]
+            
+            project_matrixes[layer_name][io_type] = Q.to(torch.bfloat16)
+    
+    end_time = time.time()
+    print(f"Computed project matrixes for ViT in {end_time - start_time:.2f} seconds.")
+    
+    # breakpoint()
+    
+    return project_matrixes
+
+
+
+
+def get_vit_project_matrix(model, dataset, batch_size, patch_locations, base_ratio=1.0/8.0):
+    activations, rank_dict = get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio)
+    # rank_dict = {}
+    # for layer_name, io_dict in activations.items():
+    #     rank_dict[layer_name] = {}
+    #     for io_type, tensors in io_dict.items():
+    #         rank_dict[layer_name][io_type] = base_ratio
+    
+    start_time = time.time()
+    
+    project_matrixes = {}
+    for layer_name, io_dict in activations.items():
+        project_matrixes[layer_name] = {}
+        for io_type, tensors in io_dict.items():
+            act = torch.cat(tensors, dim=0)  # [B, S, D]
+            act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
+            rank = rank_dict[layer_name][io_type]
+            
+            # 使用自己的算法
+            # Q, _ = randomized_qb(act, rank, left=True)
+            
+            # 或者使用 SVD 得到正交矩阵
+            U, S, Vh = torch.linalg.svd(act, full_matrices=False)
+            Q = U[:, :rank]  # [D, rank]
+            
+            project_matrixes[layer_name][io_type] = Q.to(torch.bfloat16)
+    
+    end_time = time.time()
+    print(f"Computed project matrixes for ViT in {end_time - start_time:.2f} seconds.")
+    
+    # breakpoint()
+    
+    return project_matrixes

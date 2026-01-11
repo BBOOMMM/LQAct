@@ -5,6 +5,7 @@ output/
 trainer_output/
 
 activations_save/
+dynamic_k_save/
 
 wandb/
 

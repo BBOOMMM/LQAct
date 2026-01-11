@@ -15,12 +15,16 @@ import bitsandbytes
 
 
 def detach_variable(
+    ctx,
     hidden_states: Tensor,
     args: tuple,
     kwargs: dict,
 ) -> tuple[Tensor, tuple, dict]:
 
-    if isinstance(hidden_states, CompressedTensor):
+    if hasattr(ctx, 'project_matrix'):
+        Q = ctx.project_matrix
+        detached_hidden_states = (Q @ hidden_states).reshape(ctx.org_shape).detach()
+    elif isinstance(hidden_states, CompressedTensor):
         detached_hidden_states = hidden_states.reconstruct().detach()
     else:
         detached_hidden_states = hidden_states.detach()
@@ -147,7 +151,15 @@ class CheckpointFunction(torch.autograd.Function):
 
         ctx.tensor_keys.append(None)
         if compress_kwargs is not None:
-            saved_tensors.append(CompressedTensor(hidden_states, **compress_kwargs))
+            if 'project_matrix' in compress_kwargs:
+                Q = compress_kwargs['project_matrix']
+                to_save = Q.T @ hidden_states.reshape((-1, hidden_states.shape[-1]))
+                to_save.requires_grad = hidden_states.requires_grad
+                saved_tensors.append(to_save)
+                ctx.project_matrix = Q
+                ctx.org_shape = hidden_states.shape
+            else:
+                saved_tensors.append(CompressedTensor(hidden_states, **compress_kwargs))
         else:
             saved_tensors.append(hidden_states)
 
@@ -197,7 +209,7 @@ class CheckpointFunction(torch.autograd.Function):
                 torch.set_rng_state(ctx.fwd_cpu_state)
                 if ctx.had_device_in_fwd:
                     set_device_states(ctx.fwd_devices, ctx.fwd_device_states, device_type=ctx.device_type)
-            detached_hidden_states, detached_args, detached_kwargs = detach_variable(hidden_states, input_args, input_kwargs)
+            detached_hidden_states, detached_args, detached_kwargs = detach_variable(ctx, hidden_states, input_args, input_kwargs)
 
             device_autocast_ctx = torch.autocast(
                 device_type=ctx.device_type, **ctx.device_autocast_kwargs

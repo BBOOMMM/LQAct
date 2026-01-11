@@ -61,7 +61,15 @@ class LayerNormFunction(torch.autograd.Function):
         ctx.normalized_shape = normalized_shape
         ctx.casting_mode = casting_mode
         if compress_kwargs is not None:
-            ctx.save_for_backward(CompressedTensor(output, **compress_kwargs), weight, bias, rstd)
+            if 'project_matrix' in compress_kwargs:
+                Q = compress_kwargs['project_matrix']
+                to_save = Q.T @ output.reshape((-1, output.shape[-1]))
+                to_save.requires_grad = output.requires_grad
+                ctx.save_for_backward(to_save, weight, bias, rstd)
+                ctx.project_matrix = Q
+                ctx.org_shape = output.shape
+            else:
+                ctx.save_for_backward(CompressedTensor(output, **compress_kwargs), weight, bias, rstd)
         else:
             ctx.save_for_backward(output, weight, bias, rstd)
 
@@ -74,7 +82,10 @@ class LayerNormFunction(torch.autograd.Function):
             reduction_dim = -1
         output, weight, bias, rstd, = ctx.saved_tensors
 
-        if isinstance(output, CompressedTensor):
+        if hasattr(ctx, 'project_matrix'):
+            Q = ctx.project_matrix
+            output = (Q @ output).reshape(ctx.org_shape)
+        elif isinstance(output, CompressedTensor):
             output = output.reconstruct()
 
         input_normalized = output
