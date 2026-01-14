@@ -44,8 +44,8 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
             elif patch_locations == 2:
                 # meft_patch_locations = ("norm", "ckpt_attn", "ckpt_mlp",)
                 # 存储 RMSNorm 的输出
-                # handles.append(layer.layernorm_before.register_forward_hook(get_hook(f"layer_{i}.layernorm_before", "output")))
-                # handles.append(layer.layernorm_after.register_forward_hook(get_hook(f"layer_{i}.layernorm_after", "output")))
+                handles.append(layer.layernorm_before.register_forward_hook(get_hook(f"layer_{i}.layernorm_before", "output")))
+                handles.append(layer.layernorm_after.register_forward_hook(get_hook(f"layer_{i}.layernorm_after", "output")))
                 
                 # 存储 attention 块的输入
                 handles.append(layer.attention.register_forward_hook(get_hook(f"layer_{i}.attention", "input")))
@@ -86,10 +86,14 @@ def get_vit_rank(model, dataset, batch_size, patch_locations):
     rank_dict_0p1 = {}
     rank_dict_0p9 = {}
     rank_dict_0p5 = {}
+    rank_dict_0p3 = {}
+    rank_dict_0p2 = {}
     for layer_name, io_dict in activations.items():
         rank_dict_0p9[layer_name] = {}
         rank_dict_0p1[layer_name] = {}
         rank_dict_0p5[layer_name] = {}
+        rank_dict_0p3[layer_name] = {}
+        rank_dict_0p2[layer_name] = {}
         for io_type, tensors in io_dict.items():
             act = torch.cat(tensors, dim=0)  # [B, S, D]
             act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
@@ -103,8 +107,12 @@ def get_vit_rank(model, dataset, batch_size, patch_locations):
             rank_dict_0p1[layer_name][io_type] = rank_0p1
             rank_0p5 = torch.sum(ratio < 0.5).item() + 1  # 保留50%能量所需的秩
             rank_dict_0p5[layer_name][io_type] = rank_0p5
+            rank_0p3 = torch.sum(ratio < 0.3).item() + 1  # 保留30%能量所需的秩
+            rank_dict_0p3[layer_name][io_type] = rank_0p3
+            rank_0p2 = torch.sum(ratio < 0.2).item() + 1  # 保留30%能量所需的秩
+            rank_dict_0p2[layer_name][io_type] = rank_0p2
 
-    return activations, rank_dict_0p5
+    return activations, rank_dict_0p2
 
 
 # TODO: 为了rank_ratio进行比较，需要实现各层按比例分配

@@ -9,4 +9,6 @@ dynamic_k_save/
 
 wandb/
 
+datasets/
+
 *.sh

@@ -1,6 +1,10 @@
 import os
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+import huggingface_hub
+print("login to huggingface_hub")
+huggingface_hub.login(token="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")  # Replace with your actual token
+print("login success")
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # os.environ["MKL_SERVICE_FORCE_INTEL"]="1"
 # os.environ["OMP_NUM_THREADS"] = "8"  # 控制MKL使用的线程数
@@ -78,10 +82,24 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 
-# _, rank_dict = get_vit_rank(model, dataset["train"], batch_size=512, patch_locations=2)
-rank_dict = get_vit_rank_ratio(model, dataset["train"], batch_size=512, patch_locations=2)
+_, rank_dict = get_vit_rank(model, dataset["train"], batch_size=512, patch_locations=2)
+# _, rank_dict = get_vit_rank_ratio(model, dataset["train"], batch_size=512, patch_locations=2, base_ratio=1.0/16.0)
 
-# breakpoint()
+
+num_layers = len(rank_dict)
+hidden_size = model.vit.config.hidden_size
+total_rank = 0
+for layer_name, io_dict in rank_dict.items():
+    layer_rank = 0
+    for io_type, rank in io_dict.items():
+        layer_rank += rank
+    total_rank += layer_rank
+
+print(f"总rank: {total_rank}")
+print(f'1/16 总Rank :{hidden_size * num_layers / 16}')
+print(f'1/8 总Rank :{hidden_size * num_layers / 8}')
+
+breakpoint()
 
 
 def compute_metrics(eval_pred: EvalPrediction):
@@ -134,7 +152,7 @@ trainer = MeftTrainer[Trainer](
             # "ckpt_layer",
         ),
         compress_kwargs={
-            # "rank": 0.125,
+            # "rank": 0.0625,
             "rank": rank_dict,
             # "niter": 1,
         },
