@@ -48,11 +48,14 @@ def parse_args():
     parser.add_argument('--dataset_name', type=str, default='CUB', help='数据集名称')
     parser.add_argument('--data_dir', type=str, default='./datasets/fgvc', help='数据集存放根目录')
     
+    # 训练超参数
     parser.add_argument('--epochs', type=int, default=100, help='训练总轮数')
-    parser.add_argument('--batch_size', type=int, default=32, help='批次大小')
-    parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
-
-    
+    parser.add_argument('--total_batch_size', type=int, default=512, help='总批次大小')
+    parser.add_argument('--per_device_train_batch_size', type=int, default=512, help='每次批次大小')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='梯度累积步数')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='学习率')
+    parser.add_argument('--weight_decay', type=float, default=1e-2, help='权重衰减')
+    parser.add_argument('--output_dir', type=str, default='./outputs', help='模型与LoRA参数保存路径')
 
     args = parser.parse_args()
     return args
@@ -72,6 +75,16 @@ torch.cuda.manual_seed_all(seed)
 hf_set_seed(seed)  # transformers 内部用到的随机也统一
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+
+
+import wandb
+# 配置 wandb
+run_name = f"{args.model_name}-RankRatio{args.rank_ratio}-DynamicRank" if args.dynamic_rank else f"{args.model_name}-RankRatio{args.rank_ratio}"
+wandb.init(
+    project=f"fgvc-{args.dataset_name}",
+    name=run_name,
+    config=vars(args),
+)
 
 
 num_labels = _DATASET_NUM_LABELS[args.dataset_name]
@@ -172,28 +185,25 @@ def compute_metrics(eval_pred: EvalPrediction):
 trainer = MeftTrainer[Trainer](
     model=model,
     args=TrainingArguments(
-        per_device_train_batch_size=512,
-        gradient_accumulation_steps=1,
-        per_device_eval_batch_size=32,
-        num_train_epochs=3,
-        learning_rate=1e-3,
-        weight_decay=1e-2,
-        # warmup_ratio=0.1,    # 新加
-        lr_scheduler_type="cosine",
-        bf16=True,
-        bf16_full_eval=True,
-        # deepspeed={
-        #     "train_batch_size": "auto",
-        #     "gradient_accumulation_steps": "auto",
-        #     "zero_optimization": {
-        #         "stage": 1,
-        #     },
-        # },
-        use_liger_kernel=True,
-        logging_steps=10,
-        report_to="none",
-        remove_unused_columns=False,
-        label_names=["labels"],
+        per_device_train_batch_size = args.per_device_train_batch_size,
+        gradient_accumulation_steps = args.gradient_accumulation_steps,
+        per_device_eval_batch_size = 32,
+        num_train_epochs = args.epochs,
+        learning_rate = args.learning_rate,
+        weight_decay = args.weight_decay,
+        warmup_ratio = 10/args.epochs,
+        lr_scheduler_type = "cosine",
+        optim = "adamw_torch",
+        bf16 = True,
+        bf16_full_eval = True,
+        use_liger_kernel = True,
+        logging_steps = 10,
+        report_to = ["wandb"],
+        run_name=run_name,
+        remove_unused_columns = False,
+        label_names = ["labels"],
+        evaluation_strategy = "epoch",
+        output_dir = args.output_dir,
     ),
     data_collator=None,
     train_dataset=train_dataset,
