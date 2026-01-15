@@ -20,14 +20,16 @@ from transformers import (
     AutoFeatureExtractor, SwinForImageClassification,
     ViTImageProcessor, ViTForImageClassification,
     Trainer, TrainingArguments, EvalPrediction,
+    TrainerCallback,
 )
 from peft import LoraConfig, get_peft_model
 from trl import SFTConfig, SFTTrainer
+import time
 
 from meft import MeftConfig, MeftTrainer
 import meft
 
-from get_rank.vit import get_vit_rank, get_vit_rank_ratio
+from get_rank.vit import get_vit_rank, get_vit_rank_ratio, get_vit_rank_binary_search_energy_ratio
 
 from fgvc_datasets_setup.loader import _DATASET_NUM_LABELS
 
@@ -38,12 +40,17 @@ import argparse
 def parse_args():
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('--seed', type=int, default=2026, help='随机种子')
+    parser.add_argument('--seed', type=int, default=42, help='随机种子')
     
     parser.add_argument('--model_name', type=str, default='vit-base', help='预训练模型名称或路径')
     
+    # 训练模式
+    parser.add_argument('--vanilla_train', action='store_true', help='使用不压缩的普通lora微调')
     parser.add_argument('--rank_ratio', type=float, default=0.125, help='compress rank比例')
     parser.add_argument('--dynamic_rank', action='store_true', help='是否使用动态rank')
+    parser.add_argument('--energy_ratio', type=float, default=0.5, help='动态rank时的能量保留比例')
+    parser.add_argument('--energy_search', action='store_true', help='是否使用二分搜索方式确定energy_ratio')
+    
     
     parser.add_argument('--dataset_name', type=str, default='CUB', help='数据集名称')
     parser.add_argument('--data_dir', type=str, default='./datasets/fgvc', help='数据集存放根目录')
@@ -54,7 +61,7 @@ def parse_args():
     parser.add_argument('--per_device_train_batch_size', type=int, default=512, help='每次批次大小')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='梯度累积步数')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=1e-2, help='权重衰减')
+    parser.add_argument('--weight_decay', type=float, default=1e-3, help='权重衰减')
     parser.add_argument('--output_dir', type=str, default='./outputs', help='模型与LoRA参数保存路径')
 
     args = parser.parse_args()
@@ -64,7 +71,6 @@ print("训练参数：", args)
 
 
 import random
-import numpy as np
 from transformers import set_seed as hf_set_seed
 seed = args.seed
 os.environ["PYTHONHASHSEED"] = str(seed)
@@ -79,12 +85,46 @@ torch.backends.cudnn.benchmark = False
 
 import wandb
 # 配置 wandb
-run_name = f"{args.model_name}-RankRatio{args.rank_ratio}-DynamicRank" if args.dynamic_rank else f"{args.model_name}-RankRatio{args.rank_ratio}"
+if args.vanilla_train:
+    run_name = f"{args.model_name}-lora"
+elif not args.dynamic_rank:
+    run_name = f"{args.model_name}-loract{args.rank_ratio}"
+else:
+    run_name = f"{args.model_name}-loract{args.rank_ratio}-dksearch"
+
 wandb.init(
     project=f"fgvc-{args.dataset_name}",
     name=run_name,
     config=vars(args),
 )
+
+
+class ThroughputCallback(TrainerCallback):
+    """记录每个 epoch 的耗时和吞吐量（samples/s），同时打到终端和 wandb。"""
+    def __init__(self, train_dataset_len):
+        self.train_dataset_len = train_dataset_len
+        self.epoch_start_time = None
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        self.epoch_start_time = time.time()
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if self.epoch_start_time is None:
+            return
+        epoch_time = time.time() - self.epoch_start_time
+        # 简单按一个 epoch 走完整个 train_dataset 估算吞吐量
+        samples_per_sec = self.train_dataset_len / epoch_time
+        epoch_idx = int(state.epoch) if state.epoch is not None else -1
+        print(f"[Epoch {epoch_idx}] time: {epoch_time:.2f}s, throughput: {samples_per_sec:.2f} samples/s")
+        # 记录到 wandb
+        wandb.log(
+            {
+                "epoch": epoch_idx,
+                "epoch_time_s": epoch_time,
+                "epoch_samples_per_second": samples_per_sec,
+            },
+            step=state.global_step,
+        )
 
 
 num_labels = _DATASET_NUM_LABELS[args.dataset_name]
@@ -154,25 +194,38 @@ train_dataset, val_dataset, test_dataset = get_datasets(args, processor)
 
 
 if args.dynamic_rank:
-    # _, rank_dict = get_vit_rank(model, val_dataset, batch_size=args.batch_size, patch_locations=2)
-    _, rank_dict = get_vit_rank_ratio(model, val_dataset, batch_size=args.batch_size, patch_locations=2, base_ratio=args.rank_ratio)
+    if args.energy_search:
+        activations, rank_dict = get_vit_rank_binary_search_energy_ratio(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2, rank_ratio=args.rank_ratio)
+        del activations
+        print(rank_dict)
 
+        num_layers = len(rank_dict)
+        hidden_size = model.vit.config.hidden_size
+        total_rank = 0
+        for layer_name, io_dict in rank_dict.items():
+            layer_rank = 0
+            for io_type, rank in io_dict.items():
+                layer_rank += rank
+            total_rank += layer_rank
+    else:
+        # _, rank_dict = get_vit_rank(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2)
+        activations, rank_dict = get_vit_rank_ratio(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2, base_ratio=args.rank_ratio, energy_ratio=args.energy_ratio)
+        del activations
+        print(rank_dict)
 
-    num_layers = len(rank_dict)
-    hidden_size = model.vit.config.hidden_size
-    total_rank = 0
-    for layer_name, io_dict in rank_dict.items():
-        layer_rank = 0
-        for io_type, rank in io_dict.items():
-            layer_rank += rank
-        total_rank += layer_rank
+        num_layers = len(rank_dict)
+        hidden_size = model.vit.config.hidden_size
+        total_rank = 0
+        for layer_name, io_dict in rank_dict.items():
+            layer_rank = 0
+            for io_type, rank in io_dict.items():
+                layer_rank += rank
+            total_rank += layer_rank
 
     print(f"总rank: {total_rank}")
     print(f'1/16 总Rank :{hidden_size * num_layers / 16}')
     print(f'1/8 总Rank :{hidden_size * num_layers / 8}')
 
-
-breakpoint()
 
 
 def compute_metrics(eval_pred: EvalPrediction):
@@ -181,60 +234,119 @@ def compute_metrics(eval_pred: EvalPrediction):
     predictions = np.argmax(logits, axis=-1)
     return evaluation.compute(predictions=predictions, references=labels)
 
-
-trainer = MeftTrainer[Trainer](
-    model=model,
-    args=TrainingArguments(
-        per_device_train_batch_size = args.per_device_train_batch_size,
-        gradient_accumulation_steps = args.gradient_accumulation_steps,
-        per_device_eval_batch_size = 32,
-        num_train_epochs = args.epochs,
-        learning_rate = args.learning_rate,
-        weight_decay = args.weight_decay,
-        warmup_ratio = 10/args.epochs,
-        lr_scheduler_type = "cosine",
-        optim = "adamw_torch",
-        bf16 = True,
-        bf16_full_eval = True,
-        use_liger_kernel = True,
-        logging_steps = 10,
-        report_to = ["wandb"],
-        run_name=run_name,
-        remove_unused_columns = False,
-        label_names = ["labels"],
-        evaluation_strategy = "epoch",
-        output_dir = args.output_dir,
-    ),
-    data_collator=None,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-    compute_metrics=compute_metrics,
-    meft_config=MeftConfig(
-        patch_locations=(
-            "norm",
-            # "attn_in",
-            # "attn_out",
-            # "mlp_in",
-            # "mlp_out",
-            # "act_fn",
-            "ckpt_attn",
-            "ckpt_mlp",
-            # "ckpt_layer",
+if args.vanilla_train:
+        trainer = Trainer(
+        model=model,
+        args=TrainingArguments(
+            per_device_train_batch_size = args.per_device_train_batch_size,
+            gradient_accumulation_steps = args.gradient_accumulation_steps,
+            per_device_eval_batch_size = 32,
+            num_train_epochs = args.epochs,
+            learning_rate = args.learning_rate,
+            weight_decay = args.weight_decay,
+            # warmup_ratio = 10/args.epochs,
+            lr_scheduler_type = "cosine",
+            optim = "adamw_torch",
+            bf16 = True,
+            bf16_full_eval = True,
+            use_liger_kernel = True,
+            logging_steps = 1,
+            report_to = ["wandb"],
+            run_name=run_name,
+            remove_unused_columns = False,
+            label_names = ["labels"],
+            eval_strategy = "steps",
+            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),  # 每5个epoch评估一次
+            output_dir = args.output_dir,
         ),
-        compress_kwargs={
-            # "rank": 0.0625,
-            # "rank": rank_dict,
-            "rank": rank_dict if args.dynamic_rank else args.rank_ratio,
-            # "niter": 1,
+        data_collator=None,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        compute_metrics=compute_metrics,
+        # callbacks=[ThroughputCallback(len(train_dataset))],
+    )
+else:
+    trainer = MeftTrainer[Trainer](
+        model=model,
+        args=TrainingArguments(
+            per_device_train_batch_size = args.per_device_train_batch_size,
+            gradient_accumulation_steps = args.gradient_accumulation_steps,
+            per_device_eval_batch_size = args.per_device_train_batch_size,
+            num_train_epochs = args.epochs,
+            learning_rate = args.learning_rate,
+            weight_decay = args.weight_decay,
+            # warmup_ratio = 10/args.epochs,
+            lr_scheduler_type = "cosine",
+            optim = "adamw_torch",
+            bf16 = True,
+            bf16_full_eval = True,
+            use_liger_kernel = True,
+            logging_steps = 1,
+            report_to = ["wandb"],
+            run_name=run_name,
+            remove_unused_columns = False,
+            label_names = ["labels"],
+            eval_strategy = "steps",
+            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps) ,  # 每5个epoch评估一次
+            output_dir = args.output_dir,
+        ),
+        data_collator=None,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        compute_metrics=compute_metrics,
+        # callbacks=[ThroughputCallback(len(train_dataset))],
+        meft_config=MeftConfig(
+            patch_locations=(
+                "norm",
+                # "attn_in",
+                # "attn_out",
+                # "mlp_in",
+                # "mlp_out",
+                # "act_fn",
+                "ckpt_attn",
+                "ckpt_mlp",
+                # "ckpt_layer",
+            ),
+            compress_kwargs={
+                # "rank": 0.0625,
+                # "rank": rank_dict,
+                "rank": rank_dict if args.dynamic_rank else args.rank_ratio,
+                # "niter": 1,
+            },
+            # compress_workers=2,
+        ),
+    )
+
+
+# trainer.train()
+# 记录总训练时间 & 峰值显存
+if torch.cuda.is_available():
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.synchronize()
+
+train_start = time.time()
+train_output = trainer.train()
+if torch.cuda.is_available():
+    torch.cuda.synchronize()
+train_total_time = time.time() - train_start
+
+print(f"[Train] total time: {train_total_time:.2f}s")
+
+if torch.cuda.is_available():
+    peak_mem_bytes = torch.cuda.max_memory_allocated()
+    peak_mem_gb = peak_mem_bytes / (1024 ** 3)
+    print(f"[Train] peak GPU memory: {peak_mem_gb:.2f} GB")
+    wandb.log(
+        {
+            "train_total_time_s": train_total_time,
+            "train_peak_gpu_mem_gb": peak_mem_gb,
         },
-        # compress_workers=2,
-    ),
-)
-
-
-trainer.train()
+        step=train_output.global_step if hasattr(train_output, "global_step") else None,
+    )
 
 
 # trainer.evaluate()
 test_results = trainer.evaluate(eval_dataset=test_dataset)
 print(f"测试集top-1准确率: {test_results['eval_accuracy']:.4f}")
+
+wandb.summary["test_accuracy"] = test_results["eval_accuracy"]

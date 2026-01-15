@@ -1,6 +1,8 @@
 __pycache__/
 
 output/
+outputs/
+outputs_0114/
 
 trainer_output/
 

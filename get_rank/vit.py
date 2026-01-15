@@ -12,7 +12,7 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
     eval_dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
     )  # [bs, c, h, w]   [16, 3, 224, 224]
     one_batch = next(iter(eval_dataloader))
     one_batch = {k: v.to(device) for k, v in one_batch.items()}
@@ -60,12 +60,12 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
     register_hooks()
     
     with torch.no_grad():
-        # for step, batch in enumerate(eval_dataloader):
-        #     if step >= 1:
-        #         break
-        #     batch = {k: v.to(device) for k, v in batch.items()}
-        #     outputs = model(**batch)
-        outputs = model(**one_batch)
+        for step, batch in enumerate(eval_dataloader):
+            if step >= 1:
+                break
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+        # outputs = model(**one_batch)
     
     for h in handles:
         h.remove()
@@ -81,19 +81,11 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
     return activations
 
 
-def get_vit_rank(model, dataset, batch_size, patch_locations):
+def get_vit_rank(model, dataset, batch_size, patch_locations, energy_ratio=0.5):
     activations = get_vit_activations(model, dataset, batch_size, patch_locations)
-    rank_dict_0p1 = {}
-    rank_dict_0p9 = {}
-    rank_dict_0p5 = {}
-    rank_dict_0p3 = {}
-    rank_dict_0p2 = {}
+    rank_dict = {}
     for layer_name, io_dict in activations.items():
-        rank_dict_0p9[layer_name] = {}
-        rank_dict_0p1[layer_name] = {}
-        rank_dict_0p5[layer_name] = {}
-        rank_dict_0p3[layer_name] = {}
-        rank_dict_0p2[layer_name] = {}
+        rank_dict[layer_name] = {}
         for io_type, tensors in io_dict.items():
             act = torch.cat(tensors, dim=0)  # [B, S, D]
             act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
@@ -101,23 +93,148 @@ def get_vit_rank(model, dataset, batch_size, patch_locations):
             cumsum = torch.cumsum(singular_values, dim=0)
             total = cumsum[-1]
             ratio = cumsum / total
-            rank_0p9 = torch.sum(ratio < 0.9).item() + 1  # 保留90%能量所需的秩
-            rank_dict_0p9[layer_name][io_type] = rank_0p9
-            rank_0p1 = torch.sum(ratio < 0.1).item() + 1  # 保留10%能量所需的秩
-            rank_dict_0p1[layer_name][io_type] = rank_0p1
-            rank_0p5 = torch.sum(ratio < 0.5).item() + 1  # 保留50%能量所需的秩
-            rank_dict_0p5[layer_name][io_type] = rank_0p5
-            rank_0p3 = torch.sum(ratio < 0.3).item() + 1  # 保留30%能量所需的秩
-            rank_dict_0p3[layer_name][io_type] = rank_0p3
-            rank_0p2 = torch.sum(ratio < 0.2).item() + 1  # 保留30%能量所需的秩
-            rank_dict_0p2[layer_name][io_type] = rank_0p2
+            rank = torch.sum(ratio < energy_ratio).item() + 1  # 保留30%能量所需的秩
+            rank_dict[layer_name][io_type] = rank
 
-    return activations, rank_dict_0p2
+    return activations, rank_dict
 
 
-# TODO: 为了rank_ratio进行比较，需要实现各层按比例分配
-def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1.0/8.0):
-    activations, rank_dict = get_vit_rank(model, dataset, batch_size, patch_locations)
+# 二分搜索总秩相同的 energy_ratio
+def get_vit_rank_binary_search_energy_ratio(model, dataset, batch_size, patch_locations, rank_ratio=0.125):
+    activations = get_vit_activations(model, dataset, batch_size, patch_locations)
+    num_layers = len(activations)
+    hidden_size = model.vit.config.hidden_size
+    total_rank = num_layers * int(hidden_size * rank_ratio)
+    print(f"rank_ratio : {rank_ratio}, total rank: {total_rank}")
+
+    # 1) 预先对每个激活矩阵做一次 SVD，并缓存累计能量比例 ratio
+    #    ratio: shape [D]，ratio[k] = 累计能量 / 总能量
+    ratio_dict = {}
+    for layer_name, io_dict in activations.items():
+        ratio_dict[layer_name] = {}
+        for io_type, tensors in io_dict.items():
+            act = torch.cat(tensors, dim=0)          # [B, S, D]
+            act = act.reshape(-1, act.shape[-1])     # [B*S, D]
+            act = act.to(torch.float32).to("cuda")
+            with torch.no_grad():
+                singular_values = torch.linalg.svdvals(act)  # [D]
+                cumsum = torch.cumsum(singular_values, dim=0)
+                total = cumsum[-1]
+                ratio = (cumsum / total).cpu()       # 放回 CPU，节省显存
+            ratio_dict[layer_name][io_type] = ratio
+
+            # 及时释放中间张量，避免占用过多显存
+            del act, singular_values, cumsum, total
+            torch.cuda.empty_cache()
+
+    # # 2) 用缓存的 ratio 做二分搜索，不再重复 SVD
+    # left_energy = 0.0
+    # right_energy = 1.0
+    # energy_ratio = None
+    # while right_energy - left_energy > 0.01:
+    #     energy_ratio = (left_energy + right_energy) / 2.0
+    #     current_total_rank = 0
+    #     for layer_name, io_dict in ratio_dict.items():
+    #         for io_type, ratio in io_dict.items():
+    #             # rank = 保留到能量比例 < energy_ratio 的索引数 + 1
+    #             rank = int((ratio < energy_ratio).sum().item()) + 1
+    #             current_total_rank += rank
+    #     print(f"energy_ratio: {energy_ratio:.4f}, current total rank: {current_total_rank}")
+    #     if current_total_rank > total_rank:
+    #         right_energy = energy_ratio
+    #     else:
+    #         left_energy = energy_ratio
+    
+    
+    # 2) 二分 + 以 current_total_rank 为早停条件
+    left_energy = 0.0
+    right_energy = 1.0
+    energy_ratio = None
+    tolerance = 10  # 允许的 rank 误差
+
+    while True:
+        energy_ratio = (left_energy + right_energy) / 2.0
+        current_total_rank = 0
+        for layer_name, io_dict in ratio_dict.items():
+            for io_type, ratio in io_dict.items():
+                rank = int((ratio < energy_ratio).sum().item()) + 1
+                current_total_rank += rank
+        print(f"energy_ratio: {energy_ratio:.4f}, current total rank: {current_total_rank}")
+
+        # 误差足够小就停
+        if abs(current_total_rank - total_rank) <= tolerance:
+            break
+
+        # 否则继续二分
+        if current_total_rank > total_rank:
+            right_energy = energy_ratio
+        else:
+            left_energy = energy_ratio
+
+        # 如果能量区间已经很小，也强制停止，避免死循环
+        if right_energy - left_energy < 1e-3:
+            break
+
+    # 3) 用最终确定的 energy_ratio 构造 rank_dict（同样只用 ratio）
+    rank_dict = {}
+    for layer_name, io_dict in ratio_dict.items():
+        rank_dict[layer_name] = {}
+        for io_type, ratio in io_dict.items():
+            rank = int((ratio < energy_ratio).sum().item()) + 1
+            rank_dict[layer_name][io_type] = rank
+
+    return activations, rank_dict
+
+
+# # 二分搜索总秩相同的 energy_ratio
+# def get_vit_rank(model, dataset, batch_size, patch_locations, rank_ratio=0.125):
+#     activations = get_vit_activations(model, dataset, batch_size, patch_locations)
+#     num_layers = len(activations)
+#     hidden_size = model.vit.config.hidden_size
+#     total_rank = num_layers * int(hidden_size * rank_ratio)
+#     print(f"rank_ratio : {rank_ratio}, total rank: {total_rank}")
+    
+#     left_energy = 0.0
+#     right_energy = 1.0
+#     energy_ratio = None
+#     while right_energy - left_energy > 0.01:
+#         energy_ratio = (left_energy + right_energy) / 2.0
+#         current_total_rank = 0
+#         for layer_name, io_dict in activations.items():
+#             for io_type, tensors in io_dict.items():
+#                 act = torch.cat(tensors, dim=0)  # [B, S, D]
+#                 act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
+#                 singular_values = torch.linalg.svdvals(act)
+#                 cumsum = torch.cumsum(singular_values, dim=0)
+#                 total = cumsum[-1]
+#                 ratio = cumsum / total
+#                 rank = torch.sum(ratio < energy_ratio).item() + 1  # 保留energy_ratio能量所需的秩
+#                 current_total_rank += rank
+#         print(f"energy_ratio: {energy_ratio:.4f}, current total rank: {current_total_rank}")
+#         if current_total_rank > total_rank:
+#             right_energy = energy_ratio
+#         else:
+#             left_energy = energy_ratio
+    
+#     rank_dict = {}
+#     for layer_name, io_dict in activations.items():
+#         rank_dict[layer_name] = {}
+#         for io_type, tensors in io_dict.items():
+#             act = torch.cat(tensors, dim=0)  # [B, S, D]
+#             act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
+#             singular_values = torch.linalg.svdvals(act)
+#             cumsum = torch.cumsum(singular_values, dim=0)
+#             total = cumsum[-1]
+#             ratio = cumsum / total
+#             rank = torch.sum(ratio < energy_ratio).item() + 1  # 保留30%能量所需的秩
+#             rank_dict[layer_name][io_type] = rank
+
+#     return activations, rank_dict
+
+
+# 为了rank_ratio进行比较，需要实现各层按比例分配
+def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1.0/8.0, energy_ratio=0.5):
+    activations, rank_dict = get_vit_rank(model, dataset, batch_size, patch_locations, energy_ratio)
     # breakpoint()
     num_layers = model.vit.config.num_hidden_layers
     hidden_size = model.vit.config.hidden_size
@@ -177,7 +294,7 @@ def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1
         # 即 sum_j ratio_j = n * base_ratio
         for layer_name, io_type_, r in entries:
             rank_ratio = (r / importance_sum) * (base_ratio * n * hidden_size)
-            rank_ratio_dict.setdefault(layer_name, {})[io_type_] = int(rank_ratio)
+            rank_ratio_dict.setdefault(layer_name, {})[io_type_] = int(rank_ratio + 1)
     
     # breakpoint()
 
