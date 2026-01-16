@@ -22,7 +22,7 @@ _DATASET_NUM_LABELS = {
     'OxfordFlowers': 102,
     'StanfordCars': 196,
     'StanfordDogs': 120,
-    "nabirds": 55,
+    "nabirds": 555,
 }
 
 

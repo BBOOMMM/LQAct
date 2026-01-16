@@ -29,7 +29,7 @@ import time
 from meft import MeftConfig, MeftTrainer
 import meft
 
-from get_rank.vit import get_vit_rank, get_vit_rank_ratio, get_vit_rank_binary_search_energy_ratio
+from get_rank.vit import get_vit_rank, get_vit_rank_ratio, get_vit_rank_binary_search_energy_ratio, get_vit_rank_ratio_gentle
 
 from fgvc_datasets_setup.loader import _DATASET_NUM_LABELS
 
@@ -51,18 +51,24 @@ def parse_args():
     parser.add_argument('--energy_ratio', type=float, default=0.5, help='动态rank时的能量保留比例')
     parser.add_argument('--energy_search', action='store_true', help='是否使用二分搜索方式确定energy_ratio')
     
-    
+    # 数据集
     parser.add_argument('--dataset_name', type=str, default='CUB', help='数据集名称')
     parser.add_argument('--data_dir', type=str, default='./datasets/fgvc', help='数据集存放根目录')
     
     # 训练超参数
     parser.add_argument('--epochs', type=int, default=100, help='训练总轮数')
-    parser.add_argument('--total_batch_size', type=int, default=512, help='总批次大小')
     parser.add_argument('--per_device_train_batch_size', type=int, default=512, help='每次批次大小')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='梯度累积步数')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-3, help='权重衰减')
     parser.add_argument('--output_dir', type=str, default='./outputs', help='模型与LoRA参数保存路径')
+    parser.add_argument('--wandb_project_name', type=str, default='wandb', help='wandb项目名称')
+    parser.add_argument('--wandb_run_name', type=str, default='wandb', help='wandb运行名称')
+    
+    # lora参数
+    parser.add_argument('--lora_r', type=int, default=64, help='LoRA rank')
+    parser.add_argument('--lora_alpha', type=int, default=16, help='LoRA alpha')
+    parser.add_argument('--lora_dropout', type=float, default=0.05, help='LoRA dropout概率')
 
     args = parser.parse_args()
     return args
@@ -85,16 +91,16 @@ torch.backends.cudnn.benchmark = False
 
 import wandb
 # 配置 wandb
-if args.vanilla_train:
-    run_name = f"{args.model_name}-lora"
-elif not args.dynamic_rank:
-    run_name = f"{args.model_name}-loract{args.rank_ratio}"
-else:
-    run_name = f"{args.model_name}-loract{args.rank_ratio}-dksearch"
+# if args.vanilla_train:
+#     run_name = f"{args.model_name}-lora"
+# elif not args.dynamic_rank:
+#     run_name = f"{args.model_name}-loract{args.rank_ratio}"
+# else:
+#     run_name = f"{args.model_name}-loract{args.rank_ratio}-dksearch"
 
 wandb.init(
-    project=f"fgvc-{args.dataset_name}",
-    name=run_name,
+    project=args.wandb_project_name,
+    name=args.wandb_run_name,
     config=vars(args),
 )
 
@@ -167,9 +173,9 @@ elif args.model_name == 'vit-huge':
 
 # 配置LoRA
 lora_config = LoraConfig(
-    r=8,
-    lora_alpha=16,
-    lora_dropout=0.1,
+    r=args.lora_r,
+    lora_alpha=args.lora_alpha,
+    lora_dropout=args.lora_dropout,
     target_modules=["query", "value"],
     bias="none",
     modules_to_save=["classifier"],
@@ -210,6 +216,7 @@ if args.dynamic_rank:
     else:
         # _, rank_dict = get_vit_rank(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2)
         activations, rank_dict = get_vit_rank_ratio(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2, base_ratio=args.rank_ratio, energy_ratio=args.energy_ratio)
+        # activations, rank_dict = get_vit_rank_ratio_gentle(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2, base_ratio=args.rank_ratio, energy_ratio=args.energy_ratio)
         del activations
         print(rank_dict)
 
@@ -252,11 +259,11 @@ if args.vanilla_train:
             use_liger_kernel = True,
             logging_steps = 1,
             report_to = ["wandb"],
-            run_name=run_name,
+            run_name=args.wandb_run_name,
             remove_unused_columns = False,
             label_names = ["labels"],
             eval_strategy = "steps",
-            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),  # 每5个epoch评估一次
+            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),
             output_dir = args.output_dir,
         ),
         data_collator=None,
@@ -283,11 +290,11 @@ else:
             use_liger_kernel = True,
             logging_steps = 1,
             report_to = ["wandb"],
-            run_name=run_name,
+            run_name=args.wandb_run_name,
             remove_unused_columns = False,
             label_names = ["labels"],
             eval_strategy = "steps",
-            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps) ,  # 每5个epoch评估一次
+            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),
             output_dir = args.output_dir,
         ),
         data_collator=None,

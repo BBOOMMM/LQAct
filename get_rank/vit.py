@@ -17,6 +17,8 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
     one_batch = next(iter(eval_dataloader))
     one_batch = {k: v.to(device) for k, v in one_batch.items()}
     
+    # print(one_batch["labels"].min().item(), one_batch["labels"].max().item())
+    
     model.eval()
     
     activations = defaultdict(lambda: defaultdict(list))
@@ -60,12 +62,12 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
     register_hooks()
     
     with torch.no_grad():
-        for step, batch in enumerate(eval_dataloader):
-            if step >= 1:
-                break
-            batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**batch)
-        # outputs = model(**one_batch)
+        # for step, batch in enumerate(eval_dataloader):
+        #     if step >= 5:
+        #         break
+        #     batch = {k: v.to(device) for k, v in batch.items()}
+        #     outputs = model(**batch)
+        outputs = model(**one_batch)
     
     for h in handles:
         h.remove()
@@ -87,14 +89,27 @@ def get_vit_rank(model, dataset, batch_size, patch_locations, energy_ratio=0.5):
     for layer_name, io_dict in activations.items():
         rank_dict[layer_name] = {}
         for io_type, tensors in io_dict.items():
+            # act = torch.cat(tensors, dim=0)  # [B, S, D]
+            # act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
+            # singular_values = torch.linalg.svdvals(act)
+            # cumsum = torch.cumsum(singular_values, dim=0)
+            # total = cumsum[-1]
+            # ratio = cumsum / total
+            # rank = torch.sum(ratio < energy_ratio).item() + 1  # 保留30%能量所需的秩
+            # rank_dict[layer_name][io_type] = rank
+            
             act = torch.cat(tensors, dim=0)  # [B, S, D]
             act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
-            singular_values = torch.linalg.svdvals(act)
-            cumsum = torch.cumsum(singular_values, dim=0)
-            total = cumsum[-1]
-            ratio = cumsum / total
-            rank = torch.sum(ratio < energy_ratio).item() + 1  # 保留30%能量所需的秩
+            with torch.no_grad():
+                singular_values = torch.linalg.svdvals(act)  # [D]
+                cumsum = torch.cumsum(singular_values, dim=0)
+                total = cumsum[-1]
+                rank = (cumsum / total).cpu()       # 放回 CPU，节省显存
             rank_dict[layer_name][io_type] = rank
+
+            # 及时释放中间张量，避免占用过多显存
+            del act, singular_values, cumsum, total
+            torch.cuda.empty_cache()
 
     return activations, rank_dict
 
@@ -126,24 +141,6 @@ def get_vit_rank_binary_search_energy_ratio(model, dataset, batch_size, patch_lo
             # 及时释放中间张量，避免占用过多显存
             del act, singular_values, cumsum, total
             torch.cuda.empty_cache()
-
-    # # 2) 用缓存的 ratio 做二分搜索，不再重复 SVD
-    # left_energy = 0.0
-    # right_energy = 1.0
-    # energy_ratio = None
-    # while right_energy - left_energy > 0.01:
-    #     energy_ratio = (left_energy + right_energy) / 2.0
-    #     current_total_rank = 0
-    #     for layer_name, io_dict in ratio_dict.items():
-    #         for io_type, ratio in io_dict.items():
-    #             # rank = 保留到能量比例 < energy_ratio 的索引数 + 1
-    #             rank = int((ratio < energy_ratio).sum().item()) + 1
-    #             current_total_rank += rank
-    #     print(f"energy_ratio: {energy_ratio:.4f}, current total rank: {current_total_rank}")
-    #     if current_total_rank > total_rank:
-    #         right_energy = energy_ratio
-    #     else:
-    #         left_energy = energy_ratio
     
     
     # 2) 二分 + 以 current_total_rank 为早停条件
@@ -182,54 +179,14 @@ def get_vit_rank_binary_search_energy_ratio(model, dataset, batch_size, patch_lo
         for io_type, ratio in io_dict.items():
             rank = int((ratio < energy_ratio).sum().item()) + 1
             rank_dict[layer_name][io_type] = rank
+    
+    
+    print("Adjusted rank ratio dict:")
+    for layer_name, io_dict in rank_dict.items():
+        print(f"  {layer_name}: {io_dict}")
 
     return activations, rank_dict
 
-
-# # 二分搜索总秩相同的 energy_ratio
-# def get_vit_rank(model, dataset, batch_size, patch_locations, rank_ratio=0.125):
-#     activations = get_vit_activations(model, dataset, batch_size, patch_locations)
-#     num_layers = len(activations)
-#     hidden_size = model.vit.config.hidden_size
-#     total_rank = num_layers * int(hidden_size * rank_ratio)
-#     print(f"rank_ratio : {rank_ratio}, total rank: {total_rank}")
-    
-#     left_energy = 0.0
-#     right_energy = 1.0
-#     energy_ratio = None
-#     while right_energy - left_energy > 0.01:
-#         energy_ratio = (left_energy + right_energy) / 2.0
-#         current_total_rank = 0
-#         for layer_name, io_dict in activations.items():
-#             for io_type, tensors in io_dict.items():
-#                 act = torch.cat(tensors, dim=0)  # [B, S, D]
-#                 act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
-#                 singular_values = torch.linalg.svdvals(act)
-#                 cumsum = torch.cumsum(singular_values, dim=0)
-#                 total = cumsum[-1]
-#                 ratio = cumsum / total
-#                 rank = torch.sum(ratio < energy_ratio).item() + 1  # 保留energy_ratio能量所需的秩
-#                 current_total_rank += rank
-#         print(f"energy_ratio: {energy_ratio:.4f}, current total rank: {current_total_rank}")
-#         if current_total_rank > total_rank:
-#             right_energy = energy_ratio
-#         else:
-#             left_energy = energy_ratio
-    
-#     rank_dict = {}
-#     for layer_name, io_dict in activations.items():
-#         rank_dict[layer_name] = {}
-#         for io_type, tensors in io_dict.items():
-#             act = torch.cat(tensors, dim=0)  # [B, S, D]
-#             act = act.reshape(-1, act.shape[-1]).to(torch.float32).to("cuda")  # [B*S, D]
-#             singular_values = torch.linalg.svdvals(act)
-#             cumsum = torch.cumsum(singular_values, dim=0)
-#             total = cumsum[-1]
-#             ratio = cumsum / total
-#             rank = torch.sum(ratio < energy_ratio).item() + 1  # 保留30%能量所需的秩
-#             rank_dict[layer_name][io_type] = rank
-
-#     return activations, rank_dict
 
 
 # 为了rank_ratio进行比较，需要实现各层按比例分配
@@ -295,6 +252,102 @@ def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1
         for layer_name, io_type_, r in entries:
             rank_ratio = (r / importance_sum) * (base_ratio * n * hidden_size)
             rank_ratio_dict.setdefault(layer_name, {})[io_type_] = int(rank_ratio + 1)
+    
+    print("Adjusted rank ratio dict:")
+    for layer_name, io_dict in rank_ratio_dict.items():
+        print(f"  {layer_name}: {io_dict}")
+    
+    # breakpoint()
+
+    return activations, rank_ratio_dict
+
+
+# 为了rank_ratio进行比较，需要实现各层按比例分配
+def get_vit_rank_ratio_gentle(model, dataset, batch_size, patch_locations, base_ratio=1.0/8.0, energy_ratio=0.5):
+    activations, rank_dict = get_vit_rank(model, dataset, batch_size, patch_locations, energy_ratio)
+    print("Original rank dict:")
+    for layer_name, io_dict in rank_dict.items():
+        print(f"  {layer_name}: {io_dict}")
+    num_layers = model.vit.config.num_hidden_layers
+    hidden_size = model.vit.config.hidden_size
+    
+    # 不妨先假设 hidden_size <= batch_size * seq_len
+    # base_ratio 对应 rank = hidden_size / 16
+    
+    # 假定原来统一设置秩取1/16，那么每一个layer的layernorm、attn、mlp的秩均为 hidden_size / 16
+    # 为了公平比较，需要确保总秩一样  总秩 = num_layers * (hidden_size / 16)
+    # 对不同layer的相同功能块，按rank_dict比例分配秩
+
+    # 按“功能块类型 + io_type”分组，保证相同功能块在不同 layer 间按比例分配
+    # group_key: (block_type, io_type)
+    groups: dict[tuple[str, str], list[tuple[str, str, int]]] = {}
+
+    for layer_name, io_dict in rank_dict.items():
+        for io_type, r in io_dict.items():
+            # 根据 patch_locations 和 layer_name 推出功能块类型
+            if patch_locations == 1:
+                # 只有整层输入: "layer_i" + "input"
+                block_type = "layer"
+            elif patch_locations == 2:
+                # 例如:
+                # layer_name: "layer_0.layernorm_before" / "layer_0.layernorm_after"
+                #             "layer_0.attention" / "layer_0.intermediate"
+                if "." in layer_name:
+                    suffix = layer_name.split(".", 1)[1]
+                else:
+                    suffix = "layer"
+                if suffix == "intermediate":
+                    block_type = "mlp"  # MLP 块
+                else:
+                    block_type = suffix  # layernorm_before / layernorm_after / attention
+            else:
+                raise ValueError("Only support patch_locations 1 or 2")
+
+            key = (block_type, io_type)
+            groups.setdefault(key, []).append((layer_name, io_type, r))
+    
+    # breakpoint()
+
+    # 计算每个块的 rank_ratio
+    rank_ratio_dict: dict[str, dict[str, float]] = {}
+
+    base_rank = int(hidden_size * base_ratio)
+
+    for (block_type, io_type), entries in groups.items():
+        # entries: list of (layer_name, io_type, importance_rank)
+        raw_ranks = [r for _, _, r in entries]
+        n = len(entries)
+
+        # 1) 用幂次 γ<1 平滑一下，避免过于极端
+        gamma = 0.8  # 0.5 相当于开根号，拉近大 r 和小 r 的差距
+        scores = [max(r, 1.0) ** gamma for r in raw_ranks]
+        score_sum = sum(scores)
+
+        # 2) 本组目标总秩
+        target_total_rank = base_rank * n
+
+        # 3) 先按平滑后的 scores 分配连续 rank
+        cont_ranks = [s / score_sum * target_total_rank for s in scores]
+
+        # # 4) 可选：对单层 rank 进行上下界裁剪，再重新归一化
+        # r_min = base_rank * 0.5   # 每层至少 0.25×base_rank
+        # r_max = base_rank * 2.0    # 每层最多 4×base_rank
+
+        # cont_ranks = [min(max(r, r_min), r_max) for r in cont_ranks]
+        # # 再缩放一次，使总和仍为 target_total_rank
+        # scale = target_total_rank / sum(cont_ranks)
+        # cont_ranks = [r * scale for r in cont_ranks]
+
+        # 5) 写回 rank_ratio_dict（这里其实是「每层的 rank」）
+        for (layer_name, io_type_, _), r_cont in zip(entries, cont_ranks):
+            rank = int(round(r_cont))
+            rank_ratio_dict.setdefault(layer_name, {})[io_type_] = max(rank, 1)
+    
+    # breakpoint()
+    print("Adjusted rank ratio dict:")
+    for layer_name, io_dict in rank_ratio_dict.items():
+        print(f"  {layer_name}: {io_dict}")
+    
     
     # breakpoint()
 
