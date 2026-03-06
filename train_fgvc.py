@@ -50,6 +50,7 @@ def parse_args():
     parser.add_argument('--dynamic_rank', action='store_true', help='是否使用动态rank')
     parser.add_argument('--energy_ratio', type=float, default=0.5, help='动态rank时的能量保留比例')
     parser.add_argument('--energy_search', action='store_true', help='是否使用二分搜索方式确定energy_ratio')
+    parser.add_argument('--patch_locations', type=int, default=2, help='model使用patch的位置')
     
     # 数据集
     parser.add_argument('--dataset_name', type=str, default='CUB', help='数据集名称')
@@ -199,9 +200,19 @@ def get_datasets(args, processor):
 train_dataset, val_dataset, test_dataset = get_datasets(args, processor)
 
 
+if args.patch_locations == 1:
+    meft_patch_locations = ("ckpt_layer",)
+elif args.patch_locations == 2:
+    meft_patch_locations = ("norm", "ckpt_attn", "ckpt_mlp",)
+elif args.patch_locations == 3:
+    meft_patch_locations = ("norm", "attn_in", "attn_out", "mlp_in", "mlp_out",)
+else:
+    raise ValueError("Unsupported patch_locations number.")
+
+
 if args.dynamic_rank:
     if args.energy_search:
-        activations, rank_dict = get_vit_rank_binary_search_energy_ratio(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2, rank_ratio=args.rank_ratio)
+        activations, rank_dict = get_vit_rank_binary_search_energy_ratio(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=args.patch_locations, rank_ratio=args.rank_ratio)
         del activations
         print(rank_dict)
 
@@ -215,7 +226,7 @@ if args.dynamic_rank:
             total_rank += layer_rank
     else:
         # _, rank_dict = get_vit_rank(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2)
-        activations, rank_dict = get_vit_rank_ratio(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2, base_ratio=args.rank_ratio, energy_ratio=args.energy_ratio)
+        activations, rank_dict = get_vit_rank_ratio(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=args.patch_locations, base_ratio=args.rank_ratio, energy_ratio=args.energy_ratio)
         # activations, rank_dict = get_vit_rank_ratio_gentle(model, val_dataset, batch_size=args.per_device_train_batch_size, patch_locations=2, base_ratio=args.rank_ratio, energy_ratio=args.energy_ratio)
         del activations
         print(rank_dict)
@@ -251,7 +262,7 @@ if args.vanilla_train:
             num_train_epochs = args.epochs,
             learning_rate = args.learning_rate,
             weight_decay = args.weight_decay,
-            # warmup_ratio = 10/args.epochs,
+            # warmup_ratio = 0.1,
             lr_scheduler_type = "cosine",
             optim = "adamw_torch",
             bf16 = True,
@@ -262,8 +273,9 @@ if args.vanilla_train:
             run_name=args.wandb_run_name,
             remove_unused_columns = False,
             label_names = ["labels"],
-            eval_strategy = "steps",
-            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),
+            # eval_strategy = "steps",
+            # eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),
+            eval_strategy = "epoch",
             output_dir = args.output_dir,
         ),
         data_collator=None,
@@ -282,7 +294,7 @@ else:
             num_train_epochs = args.epochs,
             learning_rate = args.learning_rate,
             weight_decay = args.weight_decay,
-            # warmup_ratio = 10/args.epochs,
+            # warmup_ratio = 0.1,
             lr_scheduler_type = "cosine",
             optim = "adamw_torch",
             bf16 = True,
@@ -293,8 +305,9 @@ else:
             run_name=args.wandb_run_name,
             remove_unused_columns = False,
             label_names = ["labels"],
-            eval_strategy = "steps",
-            eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),
+            # eval_strategy = "steps",
+            # eval_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps),
+            eval_strategy = "epoch",
             output_dir = args.output_dir,
         ),
         data_collator=None,
@@ -303,17 +316,18 @@ else:
         compute_metrics=compute_metrics,
         # callbacks=[ThroughputCallback(len(train_dataset))],
         meft_config=MeftConfig(
-            patch_locations=(
-                "norm",
-                # "attn_in",
-                # "attn_out",
-                # "mlp_in",
-                # "mlp_out",
-                # "act_fn",
-                "ckpt_attn",
-                "ckpt_mlp",
-                # "ckpt_layer",
-            ),
+            # patch_locations=(
+            #     "norm",
+            #     # "attn_in",
+            #     # "attn_out",
+            #     # "mlp_in",
+            #     # "mlp_out",
+            #     # "act_fn",
+            #     "ckpt_attn",
+            #     "ckpt_mlp",
+            #     # "ckpt_layer",
+            # ),
+            patch_locations=meft_patch_locations,
             compress_kwargs={
                 # "rank": 0.0625,
                 # "rank": rank_dict,

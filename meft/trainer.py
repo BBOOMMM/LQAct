@@ -80,6 +80,11 @@ class MeftTrainer(Trainer):
             self.patch_locations = meft_config.patch_locations
         else:
             raise TypeError("Invalid type of `meft_config.patch_locations`, must be `str`, `Iterable`, or `None`.")
+        
+        if isinstance(meft_config.compress_method, str | None):
+            self.compress_method = meft_config.compress_method
+        else:
+            raise TypeError("Invalid type of `meft_config.compress_method`, must be `str` or `None`.")
 
         if isinstance(meft_config.compress_kwargs, dict | None):
             self.compress_kwargs = meft_config.compress_kwargs
@@ -90,19 +95,28 @@ class MeftTrainer(Trainer):
             self.compress_workers = meft_config.compress_workers
         else:
             raise TypeError("Invalid type of `meft_config.compress_workers`, must be `int` or `None`.")
+        
+        if isinstance(meft_config.quant_method, str | None):
+            self.quant_method = meft_config.quant_method
+        else:
+            raise TypeError("Invalid type of `meft_config.compress_kwargs`, must be `dict` or `None`.")
 
         if self.patch_locations:
             if isinstance(self.model, PreTrainedModel):
                 apply_patch_to_model(
                     self.model,
                     patch_locations=self.patch_locations,
-                    compress_kwargs=self.compress_kwargs
+                    compress_method=self.compress_method,
+                    compress_kwargs=self.compress_kwargs,
+                    quant_method=self.quant_method,
                 )
             elif hasattr(self.model, "get_base_model") and isinstance(self.model.get_base_model(), PreTrainedModel):
                 apply_patch_to_model(
                     self.model.get_base_model(),
                     patch_locations=self.patch_locations,
-                    compress_kwargs=self.compress_kwargs
+                    compress_method=self.compress_method,
+                    compress_kwargs=self.compress_kwargs,
+                    quant_method=self.quant_method,
                 )
             else:
                 warnings.warn("The model is not an instance of PreTrainedModel. No patch will be applied.")

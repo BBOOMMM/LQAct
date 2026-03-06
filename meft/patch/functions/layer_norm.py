@@ -4,7 +4,6 @@ import transformers
 from ...ops.layer_norm import LayerNormFunction, LayerNormFunction_LowrankPlusQuantization
 from ...ops.utils import CastingMode
 
-
 def cohere_layer_norm_forward(
     self: "transformers.models.cohere.modeling_cohere.CohereLayerNorm",
     hidden_states: Tensor,
@@ -62,7 +61,9 @@ def olmo_layer_norm_forward(
 def nn_layer_norm_forward_lowrank_plus_quantization(
     self: "nn.LayerNorm",
     input: Tensor,
+    compress_method: str | None = None,
     compress_kwargs: dict | None = None,
+    quant_method: str | None = None,
 ) -> Tensor:
     output = LayerNormFunction_LowrankPlusQuantization.apply(
         input,
@@ -71,7 +72,9 @@ def nn_layer_norm_forward_lowrank_plus_quantization(
         self.bias,
         self.eps,
         CastingMode.ALL,
+        compress_method,
         compress_kwargs if self.training else None,
+        quant_method,
     )
     output, _ = output
     return output

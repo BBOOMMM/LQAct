@@ -55,19 +55,40 @@ def get_vit_activations(model, dataset, batch_size, patch_locations):
                 # 存储 mlp 块的输入
                 handles.append(layer.intermediate.register_forward_hook(get_hook(f"layer_{i}.intermediate", "input")))
             
+            elif patch_locations == 3:
+                # meft_patch_locations = ("norm", "attn_in", "attn_out", "mlp_in", "mlp_out",)
+                # 存储 RMSNorm 的输出
+                handles.append(layer.layernorm_before.register_forward_hook(get_hook(f"layer_{i}.layernorm_before", "output")))
+                handles.append(layer.layernorm_after.register_forward_hook(get_hook(f"layer_{i}.layernorm_after", "output")))
+                
+                # 存储 attention in 的输入
+                handles.append(layer.attention.attention.query.register_forward_hook(get_hook(f"layer_{i}.attention_query", "input")))
+                handles.append(layer.attention.attention.key.register_forward_hook(get_hook(f"layer_{i}.attention_key", "input")))
+                handles.append(layer.attention.attention.value.register_forward_hook(get_hook(f"layer_{i}.attention_value", "input")))
+                
+                # 存储 attention out 的输入
+                handles.append(layer.attention.output.dense.register_forward_hook(get_hook(f"layer_{i}.attention_output_dense", "input")))
+                
+                # 存储 mlp in 块的输入
+                handles.append(layer.intermediate.dense.register_forward_hook(get_hook(f"layer_{i}.intermediate_dense", "input")))
+                
+                # 存储 mlp out 块的输入
+                handles.append(layer.output.dense.register_forward_hook(get_hook(f"layer_{i}.output_dense", "input")))
+            
             else:
                 raise ValueError("Only support patch_locations 1 or 2")
 
 
     register_hooks()
     
+    steps = max(1, 1024 // batch_size)
     with torch.no_grad():
-        # for step, batch in enumerate(eval_dataloader):
-        #     if step >= 5:
-        #         break
-        #     batch = {k: v.to(device) for k, v in batch.items()}
-        #     outputs = model(**batch)
-        outputs = model(**one_batch)
+        for step, batch in enumerate(eval_dataloader):
+            if step >= steps:
+                break
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+        # outputs = model(**one_batch)
     
     for h in handles:
         h.remove()
@@ -104,7 +125,8 @@ def get_vit_rank(model, dataset, batch_size, patch_locations, energy_ratio=0.5):
                 singular_values = torch.linalg.svdvals(act)  # [D]
                 cumsum = torch.cumsum(singular_values, dim=0)
                 total = cumsum[-1]
-                rank = (cumsum / total).cpu()       # 放回 CPU，节省显存
+                ratio = (cumsum / total).cpu()       # 放回 CPU，节省显存
+                rank = torch.sum(ratio < energy_ratio).item() + 1     
             rank_dict[layer_name][io_type] = rank
 
             # 及时释放中间张量，避免占用过多显存
@@ -147,7 +169,7 @@ def get_vit_rank_binary_search_energy_ratio(model, dataset, batch_size, patch_lo
     left_energy = 0.0
     right_energy = 1.0
     energy_ratio = None
-    tolerance = 10  # 允许的 rank 误差
+    tolerance = 5  # 允许的 rank 误差
 
     while True:
         energy_ratio = (left_energy + right_energy) / 2.0
@@ -169,7 +191,7 @@ def get_vit_rank_binary_search_energy_ratio(model, dataset, batch_size, patch_lo
             left_energy = energy_ratio
 
         # 如果能量区间已经很小，也强制停止，避免死循环
-        if right_energy - left_energy < 1e-3:
+        if right_energy - left_energy < 1e-4:
             break
 
     # 3) 用最终确定的 energy_ratio 构造 rank_dict（同样只用 ratio）
@@ -225,6 +247,33 @@ def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1
                     block_type = "mlp"  # MLP 块
                 else:
                     block_type = suffix  # layernorm_before / layernorm_after / attention
+            elif patch_locations == 3:
+                # 例如:
+                #   layer_0.layernorm_before
+                #   layer_0.layernorm_after
+                #   layer_0.attention_query / attention_key / attention_value
+                #   layer_0.attention_output_dense
+                #   layer_0.intermediate_dense
+                #   layer_0.output_dense
+                if "." in layer_name:
+                    suffix = layer_name.split(".", 1)[1]
+                else:
+                    suffix = "layer"
+
+                if suffix in ("layernorm_before", "layernorm_after"):
+                    block_type = suffix
+                elif suffix in ("attention_query", "attention_key", "attention_value"):
+                    # 三个 attn_in 共享一类，用同一组重要性分配规则
+                    block_type = "attn_in"
+                elif suffix == "attention_output_dense":
+                    block_type = "attn_out"
+                elif suffix == "intermediate_dense":
+                    block_type = "mlp_in"
+                elif suffix == "output_dense":
+                    block_type = "mlp_out"
+                else:
+                    # 未知后缀，直接用原始名字分组（防御性处理）
+                    block_type = suffix
             else:
                 raise ValueError("Only support patch_locations 1 or 2")
 
@@ -237,6 +286,22 @@ def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1
     rank_ratio_dict: dict[str, dict[str, float]] = {}
 
     for (block_type, io_type), entries in groups.items():
+        # # entries: list of (layer_name, io_type, importance_rank)
+        # importance_sum = sum(r for _, _, r in entries)
+        # n = len(entries)
+
+        # if importance_sum == 0:
+        #     # 极端情况：所有 rank 都是 0，退化为均匀分配
+        #     for layer_name, io_type_, _ in entries:
+        #         rank_ratio_dict.setdefault(layer_name, {})[io_type_] = base_ratio
+        #     continue
+
+        # # 目标：这一类(block_type, io_type)的平均 rank_ratio 仍为 base_ratio，
+        # # 即 sum_j ratio_j = n * base_ratio
+        # for layer_name, io_type_, r in entries:
+        #     rank_ratio = (r / importance_sum) * (base_ratio * n * hidden_size)
+        #     rank_ratio_dict.setdefault(layer_name, {})[io_type_] = int(rank_ratio + 1)
+        
         # entries: list of (layer_name, io_type, importance_rank)
         importance_sum = sum(r for _, _, r in entries)
         n = len(entries)
@@ -247,11 +312,54 @@ def get_vit_rank_ratio(model, dataset, batch_size, patch_locations, base_ratio=1
                 rank_ratio_dict.setdefault(layer_name, {})[io_type_] = base_ratio
             continue
 
-        # 目标：这一类(block_type, io_type)的平均 rank_ratio 仍为 base_ratio，
-        # 即 sum_j ratio_j = n * base_ratio
-        for layer_name, io_type_, r in entries:
-            rank_ratio = (r / importance_sum) * (base_ratio * n * hidden_size)
-            rank_ratio_dict.setdefault(layer_name, {})[io_type_] = int(rank_ratio + 1)
+        # 本组目标总秩：sum_j rank_j = base_ratio * n * hidden_size
+        target_total_rank = int(base_ratio * n * hidden_size)
+
+        # 1) 连续秩（按重要性比例分配）
+        cont_ranks = [
+            (r / importance_sum) * target_total_rank
+            for _, _, r in entries
+        ]
+
+        # 2) 先取整并保证每层至少 1
+        int_ranks = [max(1, int(x)) for x in cont_ranks]
+        current_total = sum(int_ranks)
+
+        # 3) 调整使整数秩之和尽量等于 target_total_rank
+        if current_total > target_total_rank:
+            # 有多余的秩，需要减掉
+            surplus = current_total - target_total_rank
+            # 优先从“比连续值超得多”的层上减
+            order = sorted(
+                range(n),
+                key=lambda i: (int_ranks[i] - cont_ranks[i]),
+                reverse=True,
+            )
+            for idx in order:
+                if surplus == 0:
+                    break
+                if int_ranks[idx] > 1:
+                    int_ranks[idx] -= 1
+                    surplus -= 1
+
+        elif current_total < target_total_rank:
+            # 不足，需要补一些
+            deficit = target_total_rank - current_total
+            # 优先给“小数部分最大”的层加 1
+            order = sorted(
+                range(n),
+                key=lambda i: (cont_ranks[i] - int_ranks[i]),
+                reverse=True,
+            )
+            for idx in order:
+                if deficit == 0:
+                    break
+                int_ranks[idx] += 1
+                deficit -= 1
+
+        # 4) 写回（这里存的实际上是「每层的 rank」，名字沿用 rank_ratio_dict）
+        for (layer_name, io_type_, _), rank_int in zip(entries, int_ranks):
+            rank_ratio_dict.setdefault(layer_name, {})[io_type_] = rank_int
     
     print("Adjusted rank ratio dict:")
     for layer_name, io_dict in rank_ratio_dict.items():

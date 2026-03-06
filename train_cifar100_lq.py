@@ -126,11 +126,13 @@ lq_trainer = MeftTrainer[Trainer](
             "ckpt_mlp",
             # "ckpt_layer",
         ),
+        compress_method="lowrank_plus_quantization",
         compress_kwargs={
-            "rank": 1/128,
+            "rank": 1/16,
             # "niter": 1,
-            "lowrank_plus_quantization": True,
         },
+        quant_method='two_bit_group',
+        # quant_method='ternary',
         # compress_workers=2,
     ),
 )

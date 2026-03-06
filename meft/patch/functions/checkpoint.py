@@ -61,7 +61,9 @@ def checkpoint_lowrank_plus_quantization(
     *args,
     preserve_rng_state: bool = True,
     requires_grad: bool = True,
+    compress_method: str | None = None,
     compress_kwargs: dict | None = None,
+    quant_method: str | None = None,
     **kwargs,
 ):
     """
@@ -93,7 +95,9 @@ def checkpoint_lowrank_plus_quantization(
         hidden_states,
         preserve_rng_state,
         dummy,
+        compress_method,
         compress_kwargs,
+        quant_method,
         n_args,
         n_kwargs,
         *args,

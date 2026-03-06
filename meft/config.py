@@ -19,6 +19,10 @@ class MeftConfig:
             "If `None`, no patch is applied."
         },
     )
+    
+    compress_method: str | None= field(
+        default=None,
+    )
 
     compress_kwargs: dict | None = field(
         default=None,
@@ -36,3 +40,9 @@ class MeftConfig:
             "Empirically, set to 2 can achieve sufficient efficiency."
         },
     )
+    
+    quant_method: str | None = field(
+        default=None,
+    )
+    
+    

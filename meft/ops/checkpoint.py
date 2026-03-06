@@ -9,7 +9,13 @@ from torch.utils.checkpoint import (
 
 from ..compressed import CompressedTensor
 
+import math
+
 import bitsandbytes
+
+from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group, quantize_1bit_with_srht, dequantize_1bit_with_srht
+from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
+from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
 
 # CheckpointFunction 存储的是每层的 输入
 
@@ -24,6 +30,14 @@ def detach_variable(
     if hasattr(ctx, 'project_matrix'):
         Q = ctx.project_matrix
         detached_hidden_states = (Q @ hidden_states).reshape(ctx.org_shape).detach()
+    elif hasattr(ctx, 'seed'):
+        z = hidden_states
+        seed = ctx.seed
+        g = torch.Generator(device=z.device)
+        g.manual_seed(seed)
+        P = torch.randn(ctx.hidden_size, ctx.rank, device=z.device,
+                        dtype=z.dtype, generator=g) / math.sqrt(ctx.rank)
+        detached_hidden_states = (z @ P.T).reshape(ctx.org_shape).detach()
     elif isinstance(hidden_states, CompressedTensor):
         detached_hidden_states = hidden_states.reconstruct().detach()
     else:
@@ -53,6 +67,7 @@ def detach_variable(
 
 
 def detach_variable_LowrankPlusQuantization(
+    ctx,
     hidden_states: Tensor,
     args: tuple,
     kwargs: dict,
@@ -64,13 +79,29 @@ def detach_variable_LowrankPlusQuantization(
     #     dequant = bitsandbytes.functional.dequantize_4bit(*quant_state)
     #     detached_hidden_states = LowRank + dequant
     #     del LowRank, quant_state, dequant
-    if isinstance(hidden_states, torch.Tensor) and hasattr(hidden_states, "quant_state"):
-        quant_state = hidden_states.quant_state
-        detached_hidden_states = bitsandbytes.functional.dequantize_4bit(*quant_state)
-        del quant_state
+    # if isinstance(hidden_states, torch.Tensor) and hasattr(hidden_states, "quant_state"):
+    #     quant_state = hidden_states.quant_state
+    #     detached_hidden_states = bitsandbytes.functional.dequantize_4bit(*quant_state)
+    #     del quant_state
+    # else:
+    #     detached_hidden_states = hidden_states.detach()
+    
+    if ctx.quant_method == 'two_bit_group':
+        reconstructed_R = dequantize_2bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
+        detached_hidden_states = reconstructed_R.detach()
+        detached_hidden_states.requires_grad = True
     else:
-        detached_hidden_states = hidden_states.detach()
-    detached_hidden_states.requires_grad = hidden_states.requires_grad
+        if ctx.quant_method == 'uniform':
+            reconstructed_R = dequantize_1bit(ctx.packed_R, ctx.alpha, ctx.shape)
+        elif ctx.quant_method == 'group':
+            reconstructed_R = dequantize_1bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
+        elif ctx.quant_method == 'srht+group':
+            reconstructed_R = dequantize_1bit_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
+        elif ctx.quant_method == 'ternary':
+            reconstructed_R = dequantize_ternary_group_lastdim(ctx.packed_R, ctx.alpha, ctx.shape)
+        # reconstructed_R = 0
+        detached_hidden_states = (hidden_states.reconstruct() + reconstructed_R).detach()
+        detached_hidden_states.requires_grad = hidden_states.requires_grad
 
     detached_args = []
     for arg in args:
@@ -158,6 +189,24 @@ class CheckpointFunction(torch.autograd.Function):
                 saved_tensors.append(to_save)
                 ctx.project_matrix = Q
                 ctx.org_shape = hidden_states.shape
+            elif compress_kwargs.get('RandomGaussion', False):
+                assert 'rank' in compress_kwargs
+                r = compress_kwargs['rank']
+                hidden_size = hidden_states.shape[-1]
+                if isinstance(r, float):
+                    r = int(r * hidden_size)
+                seed = torch.randint(0, 10000, (1,)).item()
+                g = torch.Generator(device=hidden_states.device)
+                g.manual_seed(seed)
+                P = torch.randn(hidden_size, r, device=hidden_states.device,
+                                dtype=hidden_states.dtype, generator=g) / math.sqrt(r)
+                z = hidden_states.reshape(-1, hidden_size) @ P
+                z.requires_grad = hidden_states.requires_grad
+                saved_tensors.append(z)
+                ctx.seed = seed
+                ctx.org_shape = hidden_states.shape
+                ctx.hidden_size = hidden_size
+                ctx.rank = r
             else:
                 saved_tensors.append(CompressedTensor(hidden_states, **compress_kwargs))
         else:
@@ -256,7 +305,9 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
         hidden_states: Tensor,
         preserve_rng_state: bool,
         dummy: Tensor | None,
+        compress_method: str | None,
         compress_kwargs: dict | None,
+        quant_method: str | None,
         n_args: int,
         n_kwargs: int,
         *args_kwargs,
@@ -270,7 +321,7 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        run_function, self, hidden_states, preserve_rng_state, dummy, compress_kwargs, n_args, n_kwargs, *args_kwargs = inputs
+        run_function, self, hidden_states, preserve_rng_state, dummy, compress_method, compress_kwargs, quant_method, n_args, n_kwargs, *args_kwargs = inputs
         args, kwargs_keys, kwargs_vals = \
             args_kwargs[:n_args], args_kwargs[n_args:-n_kwargs], args_kwargs[-n_kwargs:]
         kwargs = dict(zip(kwargs_keys, kwargs_vals))
@@ -318,16 +369,41 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
             # LowRank.quant_state = quant_state
             # saved_tensors.append(LowRank)
             
-            to_save = torch.empty((), device=hidden_states.device, dtype=hidden_states.dtype)  # 占位符，实际不保存 hidden_states
-            to_save.requires_grad = hidden_states.requires_grad
-            quant_state = bitsandbytes.functional.quantize_4bit(
-                hidden_states,
-                quant_type="fp4",  # 指定 NF4 格式（适配正态分布的 R）
-                blocksize=128,      # 必须为 32/64/128/256
-                compress_statistics=True
-            )
-            to_save.quant_state = quant_state
-            saved_tensors.append(to_save)
+            # to_save = torch.empty((), device=hidden_states.device, dtype=hidden_states.dtype)  # 占位符，实际不保存 hidden_states
+            # to_save.requires_grad = hidden_states.requires_grad
+            # quant_state = bitsandbytes.functional.quantize_4bit(
+            #     hidden_states,
+            #     quant_type="fp4",  # 指定 NF4 格式（适配正态分布的 R）
+            #     blocksize=128,      # 必须为 32/64/128/256
+            #     compress_statistics=True
+            # )
+            # to_save.quant_state = quant_state
+            # saved_tensors.append(to_save)
+            
+            
+            if quant_method == 'two_bit_group':
+                packed_R, alpha, shape = quantize_2bit_group(hidden_states, group_size=1)
+                
+                ctx.packed_R = packed_R
+                ctx.alpha = alpha
+                ctx.shape = shape
+                ctx.quant_method = quant_method
+            else:
+                LowRank = CompressedTensor(hidden_states, **compress_kwargs)
+                R = hidden_states - LowRank.reconstruct()
+                if quant_method == 'uniform':
+                    packed_R, alpha, shape = quantize_1bit(R)
+                elif quant_method == 'group':
+                    packed_R, alpha, shape = quantize_1bit_group(R, group_size=1)
+                elif quant_method == 'srht+group':
+                    packed_R, alpha, shape = quantize_1bit_with_srht(R)
+                elif quant_method == 'ternary':
+                    packed_R, alpha, shape = quantize_ternary_group_lastdim(R)
+                saved_tensors.append(LowRank)
+                ctx.packed_R = packed_R
+                ctx.alpha = alpha
+                ctx.shape = shape
+                ctx.quant_method = quant_method
         else:
             saved_tensors.append(hidden_states)
 
@@ -356,6 +432,7 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
         input_kwargs = ctx.input_kwargs
 
         # Fill in inputs with appropriate saved tensors.
+        hidden_states = None
         for key, tensor in zip(ctx.tensor_keys, ctx.saved_tensors):
             if isinstance(key, int):
                 input_args[key] = tensor
@@ -377,7 +454,7 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
                 torch.set_rng_state(ctx.fwd_cpu_state)
                 if ctx.had_device_in_fwd:
                     set_device_states(ctx.fwd_devices, ctx.fwd_device_states, device_type=ctx.device_type)
-            detached_hidden_states, detached_args, detached_kwargs = detach_variable_LowrankPlusQuantization(hidden_states, input_args, input_kwargs)
+            detached_hidden_states, detached_args, detached_kwargs = detach_variable_LowrankPlusQuantization(ctx, hidden_states, input_args, input_kwargs)
 
             device_autocast_ctx = torch.autocast(
                 device_type=ctx.device_type, **ctx.device_autocast_kwargs
@@ -413,4 +490,4 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
             val.grad if isinstance(val, torch.Tensor) else None
             for val in detached_kwargs.values()
         )
-        return (None, None, grad_hidden_states, None, None, None, None, None) + grads_args + grads_kwargs_keys + grads_kwargs_vals
+        return (None, None, grad_hidden_states, None, None, None, None, None, None, None) + grads_args + grads_kwargs_keys + grads_kwargs_vals

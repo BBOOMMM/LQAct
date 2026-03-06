@@ -3,6 +3,8 @@ from torch import Tensor
 
 from ..compressed import CompressedTensor
 
+import math
+
 # 压缩的是 input
 class LinearFunction(torch.autograd.Function):
     @staticmethod
@@ -25,7 +27,26 @@ class LinearFunction(torch.autograd.Function):
             "cache_enabled": torch.is_autocast_cache_enabled(),
         }
         if compress_kwargs is not None:
-            ctx.save_for_backward(CompressedTensor(input, **compress_kwargs), weight, bias)
+            if compress_kwargs.get('RandomGaussion', False):
+                assert 'rank' in compress_kwargs
+                r = compress_kwargs['rank']
+                hidden_size = input.shape[-1]
+                if isinstance(r, float):
+                    r = int(r * hidden_size)
+                seed = torch.randint(0, 10000, (1,)).item()
+                g = torch.Generator(device=input.device)
+                g.manual_seed(seed)
+                P = torch.randn(hidden_size, r, device=input.device,
+                                dtype=input.dtype, generator=g) / math.sqrt(r)
+                z = input.reshape(-1, hidden_size) @ P
+                z.requires_grad = input.requires_grad
+                ctx.save_for_backward(z, weight, bias)
+                ctx.seed = seed
+                ctx.org_shape = input.shape
+                ctx.hidden_size = hidden_size
+                ctx.rank = r
+            else:
+                ctx.save_for_backward(CompressedTensor(input, **compress_kwargs), weight, bias)
         else:
             ctx.save_for_backward(input, weight, bias)
 
@@ -33,7 +54,15 @@ class LinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output: Tensor) -> tuple[Tensor | None, ...]:
         input, weight, bias = ctx.saved_tensors
 
-        if isinstance(input, CompressedTensor):
+        if hasattr(ctx, 'seed'):
+            z = input  # (B*, r)
+            seed = ctx.seed
+            g = torch.Generator(device=z.device)
+            g.manual_seed(seed)
+            P = torch.randn(ctx.hidden_size, ctx.rank, device=z.device,
+                            dtype=z.dtype, generator=g) / math.sqrt(ctx.rank)
+            input = (z @ P.T).reshape(ctx.org_shape)
+        elif isinstance(input, CompressedTensor):
             input = input.reconstruct()
 
         with torch.autocast(ctx.device_type, **ctx.autocast_kwargs):

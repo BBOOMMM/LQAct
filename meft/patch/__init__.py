@@ -31,6 +31,7 @@ from .models.siglip import *
 from .models.siglip2 import *
 from .models.swin import *
 from .models.vit import *
+from .models.dinov2 import *
 
 
 MODEL_TYPE_TO_APPLY_FN = {
@@ -72,13 +73,16 @@ MODEL_TYPE_TO_APPLY_FN = {
     "siglip2_vision_model": apply_patch_to_siglip2_vision_model,
     "swin": apply_patch_to_swin_model,
     "vit": apply_patch_to_vit_model,
+    "dinov2": apply_patch_to_dinov2_model,
 }
 
 
 def apply_patch_to_model(
     model: PreTrainedModel,
     patch_locations: Iterable | None = None,
+    compress_method: str | None = None,
     compress_kwargs: dict | None = None,
+    quant_method: str | None = None,
 ) -> None:
     """
     Apply patch to modules by replacing their forward methods. Note that
@@ -105,4 +109,4 @@ def apply_patch_to_model(
         else:
             raise TypeError("Invalid type of `patch_locations`, must be `Iterable` or `None`.")
         print(f"Applying patch to {model_type} model in: {tuple(locations_kwargs.keys())}")
-        apply_fn(model=model, **locations_kwargs, compress_kwargs=compress_kwargs)
+        apply_fn(model=model, **locations_kwargs, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)

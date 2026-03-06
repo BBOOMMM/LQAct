@@ -2,8 +2,8 @@ import os
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import sys
 from typing import List,Tuple
@@ -235,31 +235,31 @@ def register_hooks():
     def get_hook(name):
         def hook(module, input, output):
             x = input[0] if isinstance(input, tuple) else input
-            y = output[0] if isinstance(output, tuple) else output
+            # y = output[0] if isinstance(output, tuple) else output
             
             # activations[name].append(input.detach().to("cpu"), output.detach().to("cpu"))
             activations[name]['input'].append(x.detach().to("cpu"))
-            activations[name]['output'].append(y.detach().to("cpu"))
+            # activations[name]['output'].append(y.detach().to("cpu"))
         return hook
 
     for i, layer in enumerate(model.model.layers):
         # attn
         handles.append(layer.self_attn.q_proj.register_forward_hook(get_hook(f"layer_{i}.self_attn_q_proj")))
-        handles.append(layer.self_attn.k_proj.register_forward_hook(get_hook(f"layer_{i}.self_attn_k_proj")))
-        handles.append(layer.self_attn.v_proj.register_forward_hook(get_hook(f"layer_{i}.self_attn_v_proj")))
-        handles.append(layer.self_attn.o_proj.register_forward_hook(get_hook(f"layer_{i}.self_attn_o_proj")))
+        # handles.append(layer.self_attn.k_proj.register_forward_hook(get_hook(f"layer_{i}.self_attn_k_proj")))
+        # handles.append(layer.self_attn.v_proj.register_forward_hook(get_hook(f"layer_{i}.self_attn_v_proj")))
+        # handles.append(layer.self_attn.o_proj.register_forward_hook(get_hook(f"layer_{i}.self_attn_o_proj")))
         
         # mlp
         handles.append(layer.mlp.gate_proj.register_forward_hook(get_hook(f"layer_{i}.mlp_gate_proj")))
-        handles.append(layer.mlp.up_proj.register_forward_hook(get_hook(f"layer_{i}.mlp_up_proj")))
-        handles.append(layer.mlp.down_proj.register_forward_hook(get_hook(f"layer_{i}.mlp_down_proj")))
-        handles.append(layer.mlp.act_fn.register_forward_hook(get_hook(f"layer_{i}.mlp_act_fn")))
+        # handles.append(layer.mlp.up_proj.register_forward_hook(get_hook(f"layer_{i}.mlp_up_proj")))
+        # handles.append(layer.mlp.down_proj.register_forward_hook(get_hook(f"layer_{i}.mlp_down_proj")))
+        # handles.append(layer.mlp.act_fn.register_forward_hook(get_hook(f"layer_{i}.mlp_act_fn")))
         
         # input_layernorm
-        handles.append(layer.input_layernorm.register_forward_hook(get_hook(f"layer_{i}.input_layernorm")))
+        # handles.append(layer.input_layernorm.register_forward_hook(get_hook(f"layer_{i}.input_layernorm")))
         
         # post_attention_layernorm
-        handles.append(layer.post_attention_layernorm.register_forward_hook(get_hook(f"layer_{i}.post_attention_layernorm")))
+        # handles.append(layer.post_attention_layernorm.register_forward_hook(get_hook(f"layer_{i}.post_attention_layernorm")))
         
 register_hooks()
 
@@ -294,6 +294,6 @@ activations_to_save = {
 }
 
 import pickle
-with open(f"activations_save/activations_{data_name}.pkl", "wb") as f:
+with open(f"activations_save/activations_llama_{data_name}_rank.pkl", "wb") as f:
     pickle.dump(activations_to_save, f)
 

@@ -110,21 +110,7 @@ class JSONDataset(torch.utils.data.Dataset):
         im = tv.datasets.folder.default_loader(self._imdb[index]["im_path"])
         label = self._imdb[index]["class"]
         
-        # im = self.transform(im)
-        # if self._split == "train":
-        #     index = index
-        # else:
-        #     index = f"{self._split}{index}"
-        # sample = {
-        #     "image": im,
-        #     "label": label,
-        #     # "id": index
-        # }
-        # return sample
-        
-        # 使用 ViTImageProcessor 做预处理
         encoding = self.transform(images=im, return_tensors="pt")
-        # encoding["pixel_values"] 形状: [1, C, H, W]，去掉 batch 维
         pixel_values = encoding["pixel_values"].squeeze(0)
 
         return {

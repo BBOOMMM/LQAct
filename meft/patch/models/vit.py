@@ -89,7 +89,9 @@ def apply_patch_to_vit_model(
     ckpt_attn: bool = False,
     ckpt_mlp: bool = False,
     ckpt_layer: bool = False,
+    compress_method: str | None = None,
     compress_kwargs: dict | None = None,
+    quant_method: str | None = None,
 ) -> None:
     from transformers.models.vit.modeling_vit import ViTModel, ViTLayer
     base_model: ViTModel = model.base_model
@@ -143,6 +145,40 @@ def apply_patch_to_vit_model(
                 _checkpoint_module(layer, compress_kwargs=kwargs_layer)
         return
 
+    
+    # if compress_kwargs.get("lowrank_plus_quantization", False):
+    if compress_method == "lowrank_plus_quantization":
+        for i in range(len(base_model.encoder.layer)):
+            base_model.encoder.layer : ModuleList
+            layer: ViTLayer = base_model.encoder.layer[i]
+            compress_kwargs_layer_tocopy = {}
+            compress_kwargs_layer_tocopy['project_matrix'] = None
+            if norm:
+                _patch_module(layer.layernorm_before, nn_layer_norm_forward_lowrank_plus_quantization, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+                _patch_module(layer.layernorm_after, nn_layer_norm_forward_lowrank_plus_quantization, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if attn_in:
+                _patch_module(layer.attention.attention.query, nn_linear_forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+                _patch_module(layer.attention.attention.key, nn_linear_forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+                _patch_module(layer.attention.attention.value, nn_linear_forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if attn_out:
+                _patch_module(layer.attention.output.dense, nn_linear_forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if mlp_in:
+                _patch_module(layer.intermediate.dense, nn_linear_forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if mlp_out:
+                _patch_module(layer.output.dense, nn_linear_forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if act_fn:
+                _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if ckpt_attn:
+                _checkpoint_module(layer.attention, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if ckpt_mlp:
+                warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
+                _checkpoint_module(layer.intermediate, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            if ckpt_layer:
+                _checkpoint_module(layer, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
+            
+        return
+    
+    
     if type(compress_kwargs['rank']) is not dict:
         for layer in base_model.encoder.layer:
             layer: ViTLayer
@@ -183,19 +219,27 @@ def apply_patch_to_vit_model(
                 kwargs_layernorm_after['rank'] = compress_kwargs['rank'][f'layer_{i}.layernorm_after']['output']
                 _patch_module(layer.layernorm_after, nn_layer_norm_forward, compress_kwargs=kwargs_layernorm_after)
             if attn_in:
-                raise NotImplementedError
-                # _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=compress_kwargs)
-                # _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=compress_kwargs)
-                # _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=compress_kwargs)
+                kwargs_attn_q = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_attn_q['rank'] = compress_kwargs['rank'][f'layer_{i}.attention_query']['input']
+                _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=kwargs_attn_q)
+                kwargs_attn_k = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_attn_k['rank'] = compress_kwargs['rank'][f'layer_{i}.attention_key']['input']
+                _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=kwargs_attn_k)
+                kwargs_attn_v = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_attn_v['rank'] = compress_kwargs['rank'][f'layer_{i}.attention_value']['input']
+                _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=kwargs_attn_v)
             if attn_out:
-                raise NotImplementedError
-                # _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+                kwargs_attn_out = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_attn_out['rank'] = compress_kwargs['rank'][f'layer_{i}.attention_output_dense']['input']
+                _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=kwargs_attn_out)
             if mlp_in:
-                raise NotImplementedError
-                # _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+                kwargs_mlp_in = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_mlp_in['rank'] = compress_kwargs['rank'][f'layer_{i}.intermediate_dense']['input']
+                _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=kwargs_mlp_in)
             if mlp_out:
-                raise NotImplementedError
-                # _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
+                kwargs_mlp_out = copy.deepcopy(compress_kwargs_layer_tocopy)
+                kwargs_mlp_out['rank'] = compress_kwargs['rank'][f'layer_{i}.output_dense']['input']
+                _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=kwargs_mlp_out)
             if act_fn:
                 raise NotImplementedError
                 # _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_kwargs=compress_kwargs)
