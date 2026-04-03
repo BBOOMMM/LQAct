@@ -1,7 +1,7 @@
 from torch import Tensor
 import transformers.activations
 
-from ...ops.gelu import GELUFunction
+from ...ops.gelu import GELUFunction, GELUFunction_LowrankPlusQuantization
 
 
 def gelu_forward(
@@ -13,6 +13,23 @@ def gelu_forward(
         input,
         "none",
         compress_kwargs if self.training else None,
+    )
+    return output
+
+
+def gelu_forward_lowrank_plus_quantization(
+    self: "transformers.activations.GELUActivation",
+    input: Tensor,
+    compress_method: str | None = None,
+    compress_kwargs: dict | None = None,
+    quant_method: str | None = None,
+) -> Tensor:
+    output = GELUFunction_LowrankPlusQuantization.apply(
+        input,
+        "none",
+        compress_method if self.training else None,
+        compress_kwargs if self.training else None,
+        quant_method if self.training else None,
     )
     return output
 

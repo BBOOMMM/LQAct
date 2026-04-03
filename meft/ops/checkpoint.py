@@ -14,7 +14,7 @@ import math
 import bitsandbytes
 
 from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group, quantize_1bit_with_srht, dequantize_1bit_with_srht
-from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
+from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim, quantize_ternary_with_srht, dequantize_ternary_with_srht
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
 
 # CheckpointFunction 存储的是每层的 输入
@@ -99,6 +99,8 @@ def detach_variable_LowrankPlusQuantization(
             reconstructed_R = dequantize_1bit_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
         elif ctx.quant_method == 'ternary':
             reconstructed_R = dequantize_ternary_group_lastdim(ctx.packed_R, ctx.alpha, ctx.shape)
+        elif ctx.quant_method == 'ternary+srht':
+            reconstructed_R = dequantize_ternary_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
         # reconstructed_R = 0
         detached_hidden_states = (hidden_states.reconstruct() + reconstructed_R).detach()
         detached_hidden_states.requires_grad = hidden_states.requires_grad
@@ -399,6 +401,8 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
                     packed_R, alpha, shape = quantize_1bit_with_srht(R)
                 elif quant_method == 'ternary':
                     packed_R, alpha, shape = quantize_ternary_group_lastdim(R)
+                elif quant_method == 'ternary+srht':
+                    packed_R, alpha, shape = quantize_ternary_with_srht(R)
                 saved_tensors.append(LowRank)
                 ctx.packed_R = packed_R
                 ctx.alpha = alpha

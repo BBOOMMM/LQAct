@@ -5,10 +5,11 @@ from ..compressed import CompressedTensor
 from .utils import CastingMode, get_floating_eps, convert_dtype, promote_dtype
 
 from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group, quantize_1bit_with_srht, dequantize_1bit_with_srht
-from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
+from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim, quantize_ternary_with_srht, dequantize_ternary_with_srht
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
 
 import bitsandbytes
+import math
 
 class LayerNormFunction(torch.autograd.Function):
     # @torch.compile
@@ -260,6 +261,8 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
                     packed_R, alpha, shape = quantize_1bit_with_srht(R)
                 elif quant_method == 'ternary':
                     packed_R, alpha, shape = quantize_ternary_group_lastdim(R)
+                elif quant_method == 'ternary+srht':
+                    packed_R, alpha, shape = quantize_ternary_with_srht(R)
             
                 ctx.save_for_backward(LowRank, weight, bias, rstd)
                 ctx.packed_R = packed_R
@@ -298,6 +301,8 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
                 reconstructed_R = dequantize_1bit_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
             elif ctx.quant_method == 'ternary':
                 reconstructed_R = dequantize_ternary_group_lastdim(ctx.packed_R, ctx.alpha, ctx.shape)
+            elif ctx.quant_method == 'ternary+srht':
+                reconstructed_R = dequantize_ternary_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
             # reconstructed_R = 0
             output = output.reconstruct() + reconstructed_R
             

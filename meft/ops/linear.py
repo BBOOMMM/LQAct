@@ -3,6 +3,10 @@ from torch import Tensor
 
 from ..compressed import CompressedTensor
 
+from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group, quantize_1bit_with_srht, dequantize_1bit_with_srht
+from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim, quantize_ternary_with_srht, dequantize_ternary_with_srht
+from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
+
 import math
 
 # 压缩的是 input
@@ -85,3 +89,107 @@ class LinearFunction(torch.autograd.Function):
                 grad_bias = None
 
         return grad_input, grad_weight, grad_bias, None
+    
+
+
+
+
+
+class LinearFunction_LowrankPlusQuantization(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        input: Tensor,
+        weight: Tensor,
+        bias: Tensor | None = None,
+        compress_method: str | None = None,
+        compress_kwargs: dict | None = None,
+        quant_method: str | None = None,
+    ) -> Tensor:
+        return torch._C._nn.linear(input, weight, bias)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        input, weight, bias, compress_method, compress_kwargs, quant_method = inputs
+        
+        ctx.device_type = input.device.type
+        ctx.autocast_kwargs = {
+            "dtype": torch.get_autocast_dtype(ctx.device_type),
+            "enabled": torch.is_autocast_enabled(ctx.device_type),
+            "cache_enabled": torch.is_autocast_cache_enabled(),
+        }
+        if compress_kwargs is not None:
+            if quant_method == 'two_bit_group':
+                packed_R, alpha, shape = quantize_2bit_group(input, group_size=1)
+                ctx.save_for_backward(weight, bias)
+                ctx.packed_R = packed_R
+                ctx.alpha = alpha
+                ctx.shape = shape
+                ctx.quant_method = quant_method
+            else:
+                LowRank = CompressedTensor(input, **compress_kwargs)
+                R = input - LowRank.reconstruct()
+                # if compress_kwargs['quant_method'] == 'uniform':
+                if quant_method == 'uniform':
+                    packed_R, alpha, shape = quantize_1bit(R)
+                # elif compress_kwargs['quant_method'] == 'group':
+                elif quant_method == 'group':
+                    packed_R, alpha, shape = quantize_1bit_group(R, group_size=1)
+                # elif compress_kwargs['quant_method'] == 'srht+group':
+                elif quant_method == 'srht+group':
+                    packed_R, alpha, shape = quantize_1bit_with_srht(R)
+                elif quant_method == 'ternary':
+                    packed_R, alpha, shape = quantize_ternary_group_lastdim(R)
+                elif quant_method == 'ternary+srht':
+                    packed_R, alpha, shape = quantize_ternary_with_srht(R)
+            
+                ctx.save_for_backward(LowRank, weight, bias)
+                ctx.packed_R = packed_R
+                ctx.alpha = alpha
+                ctx.shape = shape
+                ctx.quant_method = quant_method
+        else:
+            ctx.save_for_backward(input, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> tuple[Tensor | None, ...]:
+        input, weight, bias = ctx.saved_tensors
+
+        if ctx.quant_method == 'two_bit_group':
+            weight, bias = ctx.saved_tensors
+            reconstructed_R = dequantize_2bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
+            input = reconstructed_R
+        else:
+            input, weight, bias = ctx.saved_tensors
+            if ctx.quant_method == 'uniform':
+                reconstructed_R = dequantize_1bit(ctx.packed_R, ctx.alpha, ctx.shape)
+            elif ctx.quant_method == 'group':
+                reconstructed_R = dequantize_1bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
+            elif ctx.quant_method == 'srht+group':
+                reconstructed_R = dequantize_1bit_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
+            elif ctx.quant_method == 'ternary':
+                reconstructed_R = dequantize_ternary_group_lastdim(ctx.packed_R, ctx.alpha, ctx.shape)
+            elif ctx.quant_method == 'ternary+srht':
+                reconstructed_R = dequantize_ternary_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
+            # reconstructed_R = 0
+            input = input.reconstruct() + reconstructed_R
+
+        with torch.autocast(ctx.device_type, **ctx.autocast_kwargs):
+            grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
+            input_2d = input.reshape(-1, input.shape[-1])
+
+            if ctx.needs_input_grad[0]:
+                grad_input = grad_output @ weight
+            else:
+                grad_input = None
+
+            if ctx.needs_input_grad[1]:
+                grad_weight = grad_output_2d.T @ input_2d
+            else:
+                grad_weight = None
+
+            if bias is not None and ctx.needs_input_grad[2]:
+                grad_bias = grad_output_2d.sum(dim=0)
+            else:
+                grad_bias = None
+
+        return grad_input, grad_weight, grad_bias, None, None, None

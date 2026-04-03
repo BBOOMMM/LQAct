@@ -151,8 +151,6 @@ def apply_patch_to_vit_model(
         for i in range(len(base_model.encoder.layer)):
             base_model.encoder.layer : ModuleList
             layer: ViTLayer = base_model.encoder.layer[i]
-            compress_kwargs_layer_tocopy = {}
-            compress_kwargs_layer_tocopy['project_matrix'] = None
             if norm:
                 _patch_module(layer.layernorm_before, nn_layer_norm_forward_lowrank_plus_quantization, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
                 _patch_module(layer.layernorm_after, nn_layer_norm_forward_lowrank_plus_quantization, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method)
