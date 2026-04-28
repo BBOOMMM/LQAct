@@ -16,6 +16,12 @@ import bitsandbytes
 from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group
 from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
+from .cached_projection import (
+    CACHED_PROJECTION_METHOD,
+    compress_cached_projection,
+    dequantize_residual,
+    reconstruct_cached_projection,
+)
 
 # CheckpointFunction 存储的是每层的 输入
 
@@ -115,7 +121,18 @@ def detach_variable_LowrankPlusQuantization(
     # else:
     #     detached_hidden_states = hidden_states.detach()
     
-    if ctx.quant_method == 'two_bit_group':
+    if getattr(ctx, "compress_method", None) == CACHED_PROJECTION_METHOD:
+        coefficients, projection = hidden_states
+        reconstructed_R = dequantize_residual(ctx.packed_R, ctx.alpha, ctx.shape, ctx.quant_method)
+        detached_hidden_states = reconstruct_cached_projection(
+            coefficients,
+            projection,
+            reconstructed_R,
+            reconstructed_R.shape,
+            coefficients.requires_grad,
+        ).detach()
+        detached_hidden_states.requires_grad = True
+    elif ctx.quant_method == 'two_bit_group':
         reconstructed_R = dequantize_2bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
         detached_hidden_states = reconstructed_R.detach()
         detached_hidden_states.requires_grad = True
@@ -354,6 +371,7 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
         kwargs = dict(zip(kwargs_keys, kwargs_vals))
 
         ctx.preserve_rng_state = preserve_rng_state
+        ctx.compress_method = compress_method
         # Accommodates the (remote) possibility that autocast is enabled for cpu AND gpu.
         ctx.device_type = _infer_device_type(hidden_states, *args, *kwargs_vals)
         ctx.device_autocast_kwargs, ctx.cpu_autocast_kwargs = _get_autocast_kwargs(
@@ -381,10 +399,21 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
         ctx.tensor_keys = []
         saved_tensors = []
 
-        ctx.tensor_keys.append(None)
+        ctx.cached_projection_hidden = False
         if compress_kwargs is not None:
-            quant_cache = get_quant_cache()
-            cache_key = _quant_cache_key(quant_method, compress_kwargs)
+            if compress_method == CACHED_PROJECTION_METHOD:
+                coefficients, projection, packed_R, alpha, shape = compress_cached_projection(
+                    hidden_states,
+                    compress_kwargs,
+                    quant_method,
+                    cache_tensor=hidden_states,
+                )
+                saved_tensors.extend([coefficients, projection])
+                ctx.cached_projection_hidden = True
+            else:
+                ctx.tensor_keys.append(None)
+                quant_cache = get_quant_cache()
+                cache_key = _quant_cache_key(quant_method, compress_kwargs)
             # LowRank = CompressedTensor(hidden_states, **compress_kwargs)
             # # Q, B = LowRank.factors
             # # R = hidden_states - (Q @ B)
@@ -408,26 +437,26 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
             # )
             # to_save.quant_state = quant_state
             # saved_tensors.append(to_save)
-
-            if hidden_states in quant_cache[cache_key]:
-                packed_R, alpha, shape = quant_cache[cache_key][hidden_states]
-                if quant_method != 'two_bit_group':
-                    saved_tensors.append(CompressedTensor(hidden_states, **compress_kwargs))
-            elif quant_method == 'two_bit_group':
-                packed_R, alpha, shape = _quantize_residual(hidden_states, quant_method)
-                quant_cache[cache_key][hidden_states] = (packed_R, alpha, shape)
-            else:
-                lowrank = CompressedTensor(hidden_states, **compress_kwargs)
-                R = hidden_states - lowrank.reconstruct()
-                packed_R, alpha, shape = _quantize_residual(R, quant_method)
-                quant_cache[cache_key][hidden_states] = (packed_R, alpha, shape)
-                saved_tensors.append(lowrank)
+                if hidden_states in quant_cache[cache_key]:
+                    packed_R, alpha, shape = quant_cache[cache_key][hidden_states]
+                    if quant_method != 'two_bit_group':
+                        saved_tensors.append(CompressedTensor(hidden_states, **compress_kwargs))
+                elif quant_method == 'two_bit_group':
+                    packed_R, alpha, shape = _quantize_residual(hidden_states, quant_method)
+                    quant_cache[cache_key][hidden_states] = (packed_R, alpha, shape)
+                else:
+                    lowrank = CompressedTensor(hidden_states, **compress_kwargs)
+                    R = hidden_states - lowrank.reconstruct()
+                    packed_R, alpha, shape = _quantize_residual(R, quant_method)
+                    quant_cache[cache_key][hidden_states] = (packed_R, alpha, shape)
+                    saved_tensors.append(lowrank)
 
             ctx.packed_R = packed_R
             ctx.alpha = alpha
             ctx.shape = shape
             ctx.quant_method = quant_method
         else:
+            ctx.tensor_keys.append(None)
             saved_tensors.append(hidden_states)
 
         for key, val in enumerate(args):
@@ -455,8 +484,14 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
         input_kwargs = ctx.input_kwargs
 
         # Fill in inputs with appropriate saved tensors.
-        hidden_states = None
-        for key, tensor in zip(ctx.tensor_keys, ctx.saved_tensors):
+        if getattr(ctx, "cached_projection_hidden", False):
+            hidden_states = (ctx.saved_tensors[0], ctx.saved_tensors[1])
+            remaining_saved_tensors = ctx.saved_tensors[2:]
+        else:
+            hidden_states = None
+            remaining_saved_tensors = ctx.saved_tensors
+
+        for key, tensor in zip(ctx.tensor_keys, remaining_saved_tensors):
             if isinstance(key, int):
                 input_args[key] = tensor
             elif isinstance(key, str):

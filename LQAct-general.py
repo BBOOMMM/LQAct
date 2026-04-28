@@ -37,6 +37,7 @@ def append_local_result(output_dir: str, args, test_results: dict, train_total_t
         "quant_method": args.quant_method,
         "rank_ratio": args.rank_ratio,
         "dynamic_rank": args.dynamic_rank,
+        "T_cycle": args.T_cycle,
         "energy_ratio": args.energy_ratio,
         "epochs": args.epochs,
         "learning_rate": args.learning_rate,
@@ -72,9 +73,10 @@ def parse_args():
         '--compress_method',
         type=str,
         default='dynamic_fixed_rank_dynamic_quantization',
-        choices=['dynamic_fixed_rank_dynamic_quantization', 'rqb', 'energy_rqb', 'probing_rqb', 'tsvd', 'rsvd', 'nyssvd'],
+        choices=['dynamic_fixed_rank_dynamic_quantization', 'cached_projection_lowrank_dynamic_quantization', 'rqb', 'energy_rqb', 'probing_rqb', 'tsvd', 'rsvd', 'nyssvd'],
         help='activation compression method passed into MeftConfig'
     )
+    parser.add_argument('--T_cycle', type=int, default=1, help='projection update cycle for cached_projection_lowrank_dynamic_quantization')
     parser.add_argument(
         '--quant_method',
         type=str,
@@ -344,6 +346,7 @@ else:
             compress_method=args.compress_method,
             compress_kwargs={
                 "rank": rank_dict if args.dynamic_rank else args.rank_ratio,
+                "T_cycle": args.T_cycle,
             },
             quant_method=args.quant_method,
         ),

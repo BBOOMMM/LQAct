@@ -5,8 +5,34 @@ from torch.nn import ModuleList
 
 from ..functions import nn_layer_norm_forward, nn_linear_forward, gelu_forward, nn_layer_norm_forward_lowrank_plus_quantization
 from ..patch import _checkpoint_module, _patch_module
+from ...ops.cached_projection import CACHED_PROJECTION_METHOD, CachedProjectionState
 
 import copy
+
+
+def _get_rank_for_vit_site(rank_config, candidates):
+    if not isinstance(rank_config, dict):
+        return rank_config
+    for layer_key, io_key in candidates:
+        if layer_key in rank_config and io_key in rank_config[layer_key]:
+            return rank_config[layer_key][io_key]
+    raise KeyError(f"Could not find rank for any of: {candidates}")
+
+
+def _make_cached_projection_kwargs(compress_kwargs, rank, state_name: str):
+    kwargs = copy.deepcopy(compress_kwargs or {})
+    T_cycle = kwargs.pop("T_cycle", kwargs.pop("t_cycle", 1))
+    niter = kwargs.pop("niter", 0)
+    oversample = kwargs.pop("oversample", 0)
+    kwargs["rank"] = rank
+    kwargs["projection_state"] = CachedProjectionState(
+        rank=rank,
+        T_cycle=T_cycle,
+        niter=niter,
+        oversample=oversample,
+    )
+    kwargs["projection_state_name"] = state_name
+    return kwargs
 
 
 def apply_patch_to_vit_model(
@@ -77,6 +103,64 @@ def apply_patch_to_vit_model(
         return
 
     
+    if compress_method == CACHED_PROJECTION_METHOD:
+        rank_config = (compress_kwargs or {}).get("rank")
+        for i in range(len(base_model.encoder.layer)):
+            base_model.encoder.layer : ModuleList
+            layer: ViTLayer = base_model.encoder.layer[i]
+
+            attn_rank = _get_rank_for_vit_site(
+                rank_config,
+                (
+                    (f"layer_{i}.layernorm_before", "output"),
+                    (f"layer_{i}.attention", "input"),
+                    (f"layer_{i}.attention_query", "input"),
+                ),
+            )
+            mlp_rank = _get_rank_for_vit_site(
+                rank_config,
+                (
+                    (f"layer_{i}.layernorm_after", "output"),
+                    (f"layer_{i}.intermediate", "input"),
+                    (f"layer_{i}.intermediate_dense", "input"),
+                ),
+            )
+            attn_kwargs = _make_cached_projection_kwargs(
+                compress_kwargs,
+                attn_rank,
+                f"layer_{i}.attn_input",
+            )
+            mlp_kwargs = _make_cached_projection_kwargs(
+                compress_kwargs,
+                mlp_rank,
+                f"layer_{i}.mlp_input",
+            )
+
+            if norm:
+                _patch_module(layer.layernorm_before, nn_layer_norm_forward_lowrank_plus_quantization, compress_method=compress_method, compress_kwargs=attn_kwargs, quant_method=quant_method)
+                _patch_module(layer.layernorm_after, nn_layer_norm_forward_lowrank_plus_quantization, compress_method=compress_method, compress_kwargs=mlp_kwargs, quant_method=quant_method)
+            if attn_in:
+                _patch_module(layer.attention.attention.query, nn_linear_forward, compress_method=compress_method, compress_kwargs=attn_kwargs, quant_method=quant_method)
+                _patch_module(layer.attention.attention.key, nn_linear_forward, compress_method=compress_method, compress_kwargs=attn_kwargs, quant_method=quant_method)
+                _patch_module(layer.attention.attention.value, nn_linear_forward, compress_method=compress_method, compress_kwargs=attn_kwargs, quant_method=quant_method)
+            if attn_out:
+                _patch_module(layer.attention.output.dense, nn_linear_forward, compress_method=compress_method, compress_kwargs=attn_kwargs, quant_method=quant_method)
+            if mlp_in:
+                _patch_module(layer.intermediate.dense, nn_linear_forward, compress_method=compress_method, compress_kwargs=mlp_kwargs, quant_method=quant_method)
+            if mlp_out:
+                _patch_module(layer.output.dense, nn_linear_forward, compress_method=compress_method, compress_kwargs=mlp_kwargs, quant_method=quant_method)
+            if act_fn:
+                _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_method=compress_method, compress_kwargs=mlp_kwargs, quant_method=quant_method)
+            if ckpt_attn:
+                _checkpoint_module(layer.attention, compress_method=compress_method, compress_kwargs=attn_kwargs, quant_method=quant_method)
+            if ckpt_mlp:
+                warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
+                _checkpoint_module(layer.intermediate, compress_method=compress_method, compress_kwargs=mlp_kwargs, quant_method=quant_method)
+            if ckpt_layer:
+                _checkpoint_module(layer, compress_method=compress_method, compress_kwargs=attn_kwargs, quant_method=quant_method)
+
+        return
+
     # if compress_kwargs.get("dynamic_fixed_rank_dynamic_quantization", False):
     if compress_method == "dynamic_fixed_rank_dynamic_quantization":
         for i in range(len(base_model.encoder.layer)):

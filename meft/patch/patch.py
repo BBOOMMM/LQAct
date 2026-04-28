@@ -13,6 +13,11 @@ from .functions import (
     nn_linear_forward_lowrank_plus_quantization,
 )
 
+LOWRANK_PLUS_QUANTIZATION_METHODS = {
+    "dynamic_fixed_rank_dynamic_quantization",
+    "cached_projection_lowrank_dynamic_quantization",
+}
+
 
 def _checkpoint_module(
     module: nn.Module,
@@ -21,7 +26,7 @@ def _checkpoint_module(
     quant_method: str | None = None,
 ) -> None:
     requires_grad = any(param.requires_grad for param in module.parameters())
-    if compress_method == "dynamic_fixed_rank_dynamic_quantization":
+    if compress_method in LOWRANK_PLUS_QUANTIZATION_METHODS:
         module.forward = MethodType(partial(checkpoint_lowrank_plus_quantization, module.forward.__func__, requires_grad=requires_grad, compress_method=compress_method,compress_kwargs=compress_kwargs, quant_method=quant_method,), module)
     else:
         module.forward = MethodType(partial(checkpoint, module.forward.__func__, requires_grad=requires_grad, compress_kwargs=compress_kwargs), module)
@@ -35,7 +40,7 @@ def _patch_module(
     quant_method: str | None = None,
 ) -> None:
     if (
-        compress_method == "dynamic_fixed_rank_dynamic_quantization"
+        compress_method in LOWRANK_PLUS_QUANTIZATION_METHODS
         and forward is nn_linear_forward
     ):
         forward = nn_linear_forward_lowrank_plus_quantization
@@ -49,7 +54,7 @@ def _patch_module(
         elif hasattr(module, "__module__") and module.__module__.startswith("peft."):
             warnings.warn(f"No patch supported for module type: {type(module)}.")
             return
-    if compress_method == 'dynamic_fixed_rank_dynamic_quantization':
+    if compress_method in LOWRANK_PLUS_QUANTIZATION_METHODS:
         module.forward = MethodType(partial(forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method), module)
     else:
         module.forward = MethodType(partial(forward, compress_kwargs=compress_kwargs), module)

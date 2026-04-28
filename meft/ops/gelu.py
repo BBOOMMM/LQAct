@@ -8,6 +8,12 @@ from ..compressed import CompressedTensor
 from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group
 from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
+from .cached_projection import (
+    CACHED_PROJECTION_METHOD,
+    compress_cached_projection,
+    dequantize_residual,
+    reconstruct_cached_projection,
+)
 
 
 class GELUFunction(torch.autograd.Function):
@@ -87,7 +93,20 @@ class GELUFunction_LowrankPlusQuantization(torch.autograd.Function):
         input, approximate, compress_method, compress_kwargs, quant_method = inputs
         ctx.approximate = approximate
         if compress_kwargs is not None:
-            if quant_method == 'two_bit_group':
+            if compress_method == CACHED_PROJECTION_METHOD:
+                coefficients, projection, packed_R, alpha, shape = compress_cached_projection(
+                    input,
+                    compress_kwargs,
+                    quant_method,
+                    cache_tensor=input,
+                )
+                ctx.save_for_backward(coefficients, projection)
+                ctx.packed_R = packed_R
+                ctx.alpha = alpha
+                ctx.shape = shape
+                ctx.quant_method = quant_method
+                ctx.compress_method = compress_method
+            elif quant_method == 'two_bit_group':
                 packed_R, alpha, shape = quantize_2bit_group(input, group_size=1)
                 ctx.packed_R = packed_R
                 ctx.alpha = alpha
@@ -120,7 +139,17 @@ class GELUFunction_LowrankPlusQuantization(torch.autograd.Function):
         # if isinstance(input, CompressedTensor):
         #     input = input.reconstruct()
         
-        if ctx.quant_method == 'two_bit_group':
+        if getattr(ctx, "compress_method", None) == CACHED_PROJECTION_METHOD:
+            coefficients, projection, = ctx.saved_tensors
+            reconstructed_R = dequantize_residual(ctx.packed_R, ctx.alpha, ctx.shape, ctx.quant_method)
+            input = reconstruct_cached_projection(
+                coefficients,
+                projection,
+                reconstructed_R,
+                reconstructed_R.shape,
+                coefficients.requires_grad,
+            )
+        elif ctx.quant_method == 'two_bit_group':
             reconstructed_R = dequantize_2bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
             input = reconstructed_R
         else:

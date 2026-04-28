@@ -7,6 +7,12 @@ from .utils import CastingMode, get_floating_eps, convert_dtype, promote_dtype
 from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group
 from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
+from .cached_projection import (
+    CACHED_PROJECTION_METHOD,
+    compress_cached_projection,
+    dequantize_residual,
+    reconstruct_cached_projection,
+)
 
 import bitsandbytes
 import math
@@ -245,10 +251,20 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
         output, rstd = output
         ctx.normalized_shape = normalized_shape
         ctx.casting_mode = casting_mode
+        ctx.compress_method = compress_method
         if compress_kwargs is not None:
-            quant_cache = get_quant_cache()
-            cache_key = _quant_cache_key(quant_method, compress_kwargs)
-            cache_tensor = input if isinstance(input, Tensor) else None
+            if compress_method == CACHED_PROJECTION_METHOD:
+                coefficients, projection, packed_R, alpha, shape = compress_cached_projection(
+                    output,
+                    compress_kwargs,
+                    quant_method,
+                    cache_tensor=output,
+                )
+                saved_tensors = (coefficients, projection, weight, bias, rstd)
+            else:
+                quant_cache = get_quant_cache()
+                cache_key = _quant_cache_key(quant_method, compress_kwargs)
+                cache_tensor = input if isinstance(input, Tensor) else None
             # LowRank = CompressedTensor(output, **compress_kwargs)
             # # Q, B = LowRank.factors
             # # R = output - (Q @ B)
@@ -271,26 +287,25 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
             # )
             # to_save.quant_state = quant_state
             # ctx.save_for_backward(to_save, weight, bias, rstd)
-
-            if cache_tensor is not None and cache_tensor in quant_cache[cache_key]:
-                packed_R, alpha, shape = quant_cache[cache_key][cache_tensor]
-                if quant_method == 'two_bit_group':
+                if cache_tensor is not None and cache_tensor in quant_cache[cache_key]:
+                    packed_R, alpha, shape = quant_cache[cache_key][cache_tensor]
+                    if quant_method == 'two_bit_group':
+                        saved_tensors = (weight, bias, rstd)
+                    else:
+                        lowrank = CompressedTensor(output, **compress_kwargs)
+                        saved_tensors = (lowrank, weight, bias, rstd)
+                elif quant_method == 'two_bit_group':
+                    packed_R, alpha, shape = _quantize_residual(output, quant_method)
+                    if cache_tensor is not None:
+                        quant_cache[cache_key][cache_tensor] = (packed_R, alpha, shape)
                     saved_tensors = (weight, bias, rstd)
                 else:
                     lowrank = CompressedTensor(output, **compress_kwargs)
+                    R = output - lowrank.reconstruct()
+                    packed_R, alpha, shape = _quantize_residual(R, quant_method)
+                    if cache_tensor is not None:
+                        quant_cache[cache_key][cache_tensor] = (packed_R, alpha, shape)
                     saved_tensors = (lowrank, weight, bias, rstd)
-            elif quant_method == 'two_bit_group':
-                packed_R, alpha, shape = _quantize_residual(output, quant_method)
-                if cache_tensor is not None:
-                    quant_cache[cache_key][cache_tensor] = (packed_R, alpha, shape)
-                saved_tensors = (weight, bias, rstd)
-            else:
-                lowrank = CompressedTensor(output, **compress_kwargs)
-                R = output - lowrank.reconstruct()
-                packed_R, alpha, shape = _quantize_residual(R, quant_method)
-                if cache_tensor is not None:
-                    quant_cache[cache_key][cache_tensor] = (packed_R, alpha, shape)
-                saved_tensors = (lowrank, weight, bias, rstd)
 
             ctx.save_for_backward(*saved_tensors)
             ctx.packed_R = packed_R
@@ -315,7 +330,17 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
         #     output = LowRank + dequant
         #     del LowRank, quant_state, dequant
 
-        if ctx.quant_method == 'two_bit_group':
+        if ctx.compress_method == CACHED_PROJECTION_METHOD:
+            coefficients, projection, weight, bias, rstd, = ctx.saved_tensors
+            reconstructed_R = dequantize_residual(ctx.packed_R, ctx.alpha, ctx.shape, ctx.quant_method)
+            output = reconstruct_cached_projection(
+                coefficients,
+                projection,
+                reconstructed_R,
+                reconstructed_R.shape,
+                coefficients.requires_grad,
+            )
+        elif ctx.quant_method == 'two_bit_group':
             weight, bias, rstd, = ctx.saved_tensors
             reconstructed_R = dequantize_2bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
             output = reconstructed_R

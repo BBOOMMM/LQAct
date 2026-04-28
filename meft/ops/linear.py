@@ -6,6 +6,12 @@ from ..compressed import CompressedTensor
 from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group
 from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
+from .cached_projection import (
+    CACHED_PROJECTION_METHOD,
+    compress_cached_projection,
+    dequantize_residual,
+    reconstruct_cached_projection,
+)
 
 import math
 
@@ -119,7 +125,19 @@ class LinearFunction_LowrankPlusQuantization(torch.autograd.Function):
         }
         ctx.quant_method = quant_method
         if compress_kwargs is not None:
-            if quant_method == 'two_bit_group':
+            if compress_method == CACHED_PROJECTION_METHOD:
+                coefficients, projection, packed_R, alpha, shape = compress_cached_projection(
+                    input,
+                    compress_kwargs,
+                    quant_method,
+                    cache_tensor=input,
+                )
+                ctx.save_for_backward(coefficients, projection, weight, bias)
+                ctx.packed_R = packed_R
+                ctx.alpha = alpha
+                ctx.shape = shape
+                ctx.compress_method = compress_method
+            elif quant_method == 'two_bit_group':
                 packed_R, alpha, shape = quantize_2bit_group(input, group_size=1)
                 ctx.save_for_backward(weight, bias)
                 ctx.packed_R = packed_R
@@ -146,7 +164,17 @@ class LinearFunction_LowrankPlusQuantization(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: Tensor) -> tuple[Tensor | None, ...]:
-        if ctx.quant_method == 'two_bit_group':
+        if getattr(ctx, "compress_method", None) == CACHED_PROJECTION_METHOD:
+            coefficients, projection, weight, bias = ctx.saved_tensors
+            reconstructed_R = dequantize_residual(ctx.packed_R, ctx.alpha, ctx.shape, ctx.quant_method)
+            input = reconstruct_cached_projection(
+                coefficients,
+                projection,
+                reconstructed_R,
+                reconstructed_R.shape,
+                coefficients.requires_grad,
+            )
+        elif ctx.quant_method == 'two_bit_group':
             weight, bias = ctx.saved_tensors
             reconstructed_R = dequantize_2bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
             input = reconstructed_R
