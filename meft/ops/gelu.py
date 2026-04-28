@@ -5,8 +5,8 @@ from torch import Tensor
 
 from ..compressed import CompressedTensor
 
-from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group, quantize_1bit_with_srht, dequantize_1bit_with_srht
-from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim, quantize_ternary_with_srht, dequantize_ternary_with_srht
+from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group
+from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
 
 
@@ -96,19 +96,14 @@ class GELUFunction_LowrankPlusQuantization(torch.autograd.Function):
             else:
                 LowRank = CompressedTensor(input, **compress_kwargs)
                 R = input - LowRank.reconstruct()
-                # if compress_kwargs['quant_method'] == 'uniform':
-                if quant_method == 'uniform':
+                # if compress_kwargs['quant_method'] == '1bit_pertensor':
+                if quant_method == '1bit_pertensor':
                     packed_R, alpha, shape = quantize_1bit(R)
-                # elif compress_kwargs['quant_method'] == 'group':
-                elif quant_method == 'group':
+                # elif compress_kwargs['quant_method'] == '1bit_pergroupchannel':
+                elif quant_method == '1bit_pergroupchannel':
                     packed_R, alpha, shape = quantize_1bit_group(R, group_size=1)
-                # elif compress_kwargs['quant_method'] == 'srht+group':
-                elif quant_method == 'srht+group':
-                    packed_R, alpha, shape = quantize_1bit_with_srht(R)
                 elif quant_method == 'ternary':
                     packed_R, alpha, shape = quantize_ternary_group_lastdim(R)
-                elif quant_method == 'ternary+srht':
-                    packed_R, alpha, shape = quantize_ternary_with_srht(R)
             
                 ctx.save_for_backward(LowRank)
                 ctx.packed_R = packed_R
@@ -130,16 +125,12 @@ class GELUFunction_LowrankPlusQuantization(torch.autograd.Function):
             input = reconstructed_R
         else:
             input, = ctx.saved_tensors
-            if ctx.quant_method == 'uniform':
+            if ctx.quant_method == '1bit_pertensor':
                 reconstructed_R = dequantize_1bit(ctx.packed_R, ctx.alpha, ctx.shape)
-            elif ctx.quant_method == 'group':
+            elif ctx.quant_method == '1bit_pergroupchannel':
                 reconstructed_R = dequantize_1bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
-            elif ctx.quant_method == 'srht+group':
-                reconstructed_R = dequantize_1bit_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
             elif ctx.quant_method == 'ternary':
                 reconstructed_R = dequantize_ternary_group_lastdim(ctx.packed_R, ctx.alpha, ctx.shape)
-            elif ctx.quant_method == 'ternary+srht':
-                reconstructed_R = dequantize_ternary_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
             # reconstructed_R = 0
             input = input.reconstruct() + reconstructed_R
 

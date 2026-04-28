@@ -32,6 +32,7 @@ from .models.siglip2 import *
 from .models.swin import *
 from .models.vit import *
 from .models.dinov2 import *
+from .models.yolos import *
 from .models.roberta import *
 
 
@@ -75,6 +76,7 @@ MODEL_TYPE_TO_APPLY_FN = {
     "swin": apply_patch_to_swin_model,
     "vit": apply_patch_to_vit_model,
     "dinov2": apply_patch_to_dinov2_model,
+    "yolos": apply_patch_to_yolos_model,
     "roberta": apply_patch_to_roberta_model,
 }
 

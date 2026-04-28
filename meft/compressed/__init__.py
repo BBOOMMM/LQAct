@@ -1,2 +1,2 @@
 from .tensor import CompressedTensor
-from .utils import get_compress_cache, get_compress_processor
+from .utils import get_compress_cache, get_compress_processor, get_quant_cache

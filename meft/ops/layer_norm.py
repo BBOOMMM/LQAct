@@ -1,15 +1,45 @@
 import torch
 from torch import Tensor
 
-from ..compressed import CompressedTensor
+from ..compressed import CompressedTensor, get_quant_cache
 from .utils import CastingMode, get_floating_eps, convert_dtype, promote_dtype
 
-from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group, quantize_1bit_with_srht, dequantize_1bit_with_srht
-from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim, quantize_ternary_with_srht, dequantize_ternary_with_srht
+from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group
+from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
 
 import bitsandbytes
 import math
+
+
+def _freeze_cache_value(value):
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze_cache_value(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_cache_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_cache_value(item) for item in value))
+    return value
+
+
+def _quant_cache_key(quant_method: str | None, compress_kwargs: dict | None) -> tuple:
+    kwargs_items = tuple(
+        sorted((key, _freeze_cache_value(value)) for key, value in (compress_kwargs or {}).items())
+    )
+    return quant_method, kwargs_items
+
+
+def _quantize_residual(tensor: Tensor, quant_method: str | None):
+    if quant_method == "1bit_pertensor":
+        return quantize_1bit(tensor)
+    if quant_method == "1bit_pergroupchannel":
+        return quantize_1bit_group(tensor, group_size=1)
+    if quant_method == "ternary":
+        return quantize_ternary_group_lastdim(tensor)
+    if quant_method == "two_bit_group":
+        return quantize_2bit_group(tensor, group_size=1)
+    raise ValueError(f"Unsupported quant_method: {quant_method}")
+
 
 class LayerNormFunction(torch.autograd.Function):
     # @torch.compile
@@ -216,6 +246,9 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
         ctx.normalized_shape = normalized_shape
         ctx.casting_mode = casting_mode
         if compress_kwargs is not None:
+            quant_cache = get_quant_cache()
+            cache_key = _quant_cache_key(quant_method, compress_kwargs)
+            cache_tensor = input if isinstance(input, Tensor) else None
             # LowRank = CompressedTensor(output, **compress_kwargs)
             # # Q, B = LowRank.factors
             # # R = output - (Q @ B)
@@ -238,37 +271,32 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
             # )
             # to_save.quant_state = quant_state
             # ctx.save_for_backward(to_save, weight, bias, rstd)
-            
-            
-            if quant_method == 'two_bit_group':
-                packed_R, alpha, shape = quantize_2bit_group(output, group_size=1)
-                ctx.save_for_backward(weight, bias, rstd)
-                ctx.packed_R = packed_R
-                ctx.alpha = alpha
-                ctx.shape = shape
-                ctx.quant_method = quant_method
+
+            if cache_tensor is not None and cache_tensor in quant_cache[cache_key]:
+                packed_R, alpha, shape = quant_cache[cache_key][cache_tensor]
+                if quant_method == 'two_bit_group':
+                    saved_tensors = (weight, bias, rstd)
+                else:
+                    lowrank = CompressedTensor(output, **compress_kwargs)
+                    saved_tensors = (lowrank, weight, bias, rstd)
+            elif quant_method == 'two_bit_group':
+                packed_R, alpha, shape = _quantize_residual(output, quant_method)
+                if cache_tensor is not None:
+                    quant_cache[cache_key][cache_tensor] = (packed_R, alpha, shape)
+                saved_tensors = (weight, bias, rstd)
             else:
-                LowRank = CompressedTensor(output, **compress_kwargs)
-                R = output - LowRank.reconstruct()
-                # if compress_kwargs['quant_method'] == 'uniform':
-                if quant_method == 'uniform':
-                    packed_R, alpha, shape = quantize_1bit(R)
-                # elif compress_kwargs['quant_method'] == 'group':
-                elif quant_method == 'group':
-                    packed_R, alpha, shape = quantize_1bit_group(R, group_size=1)
-                # elif compress_kwargs['quant_method'] == 'srht+group':
-                elif quant_method == 'srht+group':
-                    packed_R, alpha, shape = quantize_1bit_with_srht(R)
-                elif quant_method == 'ternary':
-                    packed_R, alpha, shape = quantize_ternary_group_lastdim(R)
-                elif quant_method == 'ternary+srht':
-                    packed_R, alpha, shape = quantize_ternary_with_srht(R)
-            
-                ctx.save_for_backward(LowRank, weight, bias, rstd)
-                ctx.packed_R = packed_R
-                ctx.alpha = alpha
-                ctx.shape = shape
-                ctx.quant_method = quant_method
+                lowrank = CompressedTensor(output, **compress_kwargs)
+                R = output - lowrank.reconstruct()
+                packed_R, alpha, shape = _quantize_residual(R, quant_method)
+                if cache_tensor is not None:
+                    quant_cache[cache_key][cache_tensor] = (packed_R, alpha, shape)
+                saved_tensors = (lowrank, weight, bias, rstd)
+
+            ctx.save_for_backward(*saved_tensors)
+            ctx.packed_R = packed_R
+            ctx.alpha = alpha
+            ctx.shape = shape
+            ctx.quant_method = quant_method
         else:
             ctx.save_for_backward(output, weight, bias, rstd)
 
@@ -293,16 +321,12 @@ class LayerNormFunction_LowrankPlusQuantization(torch.autograd.Function):
             output = reconstructed_R
         else:
             output, weight, bias, rstd, = ctx.saved_tensors
-            if ctx.quant_method == 'uniform':
+            if ctx.quant_method == '1bit_pertensor':
                 reconstructed_R = dequantize_1bit(ctx.packed_R, ctx.alpha, ctx.shape)
-            elif ctx.quant_method == 'group':
+            elif ctx.quant_method == '1bit_pergroupchannel':
                 reconstructed_R = dequantize_1bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
-            elif ctx.quant_method == 'srht+group':
-                reconstructed_R = dequantize_1bit_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
             elif ctx.quant_method == 'ternary':
                 reconstructed_R = dequantize_ternary_group_lastdim(ctx.packed_R, ctx.alpha, ctx.shape)
-            elif ctx.quant_method == 'ternary+srht':
-                reconstructed_R = dequantize_ternary_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
             # reconstructed_R = 0
             output = output.reconstruct() + reconstructed_R
             

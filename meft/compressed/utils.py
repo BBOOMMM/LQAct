@@ -32,11 +32,17 @@ RECONSTRUCT_FUNC_MAPPING: dict[str, dict[str, Callable[..., Tensor]]] = {
 
 
 _compress_cache = defaultdict(WeakHashKeyDictionary)
+_quant_cache = defaultdict(WeakHashKeyDictionary)
 _compress_processor = TaskProcessor()
 
 
 def get_compress_cache():
     return _compress_cache
+
+
+def get_quant_cache():
+    return _quant_cache
+
 
 def get_compress_processor():
     return _compress_processor

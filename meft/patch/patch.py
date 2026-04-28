@@ -6,7 +6,12 @@ from functools import partial
 from torch import nn
 from transformers.utils.import_utils import is_peft_available
 
-from .functions import checkpoint, nn_linear_forward, checkpoint_lowrank_plus_quantization
+from .functions import (
+    checkpoint,
+    checkpoint_lowrank_plus_quantization,
+    nn_linear_forward,
+    nn_linear_forward_lowrank_plus_quantization,
+)
 
 
 def _checkpoint_module(
@@ -16,7 +21,7 @@ def _checkpoint_module(
     quant_method: str | None = None,
 ) -> None:
     requires_grad = any(param.requires_grad for param in module.parameters())
-    if compress_method == "lowrank_plus_quantization":
+    if compress_method == "dynamic_fixed_rank_dynamic_quantization":
         module.forward = MethodType(partial(checkpoint_lowrank_plus_quantization, module.forward.__func__, requires_grad=requires_grad, compress_method=compress_method,compress_kwargs=compress_kwargs, quant_method=quant_method,), module)
     else:
         module.forward = MethodType(partial(checkpoint, module.forward.__func__, requires_grad=requires_grad, compress_kwargs=compress_kwargs), module)
@@ -29,6 +34,12 @@ def _patch_module(
     compress_kwargs: dict | None = None,
     quant_method: str | None = None,
 ) -> None:
+    if (
+        compress_method == "dynamic_fixed_rank_dynamic_quantization"
+        and forward is nn_linear_forward
+    ):
+        forward = nn_linear_forward_lowrank_plus_quantization
+
     if is_peft_available():
         from peft.tuners.tuners_utils import BaseTunerLayer
         if isinstance(module, BaseTunerLayer):
@@ -38,7 +49,7 @@ def _patch_module(
         elif hasattr(module, "__module__") and module.__module__.startswith("peft."):
             warnings.warn(f"No patch supported for module type: {type(module)}.")
             return
-    if compress_method == 'lowrank_plus_quantization':
+    if compress_method == 'dynamic_fixed_rank_dynamic_quantization':
         module.forward = MethodType(partial(forward, compress_method=compress_method, compress_kwargs=compress_kwargs, quant_method=quant_method), module)
     else:
         module.forward = MethodType(partial(forward, compress_kwargs=compress_kwargs), module)

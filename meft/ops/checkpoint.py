@@ -7,17 +7,46 @@ from torch.utils.checkpoint import (
     _get_device_module, _infer_device_type, get_device_states, set_device_states, _get_autocast_kwargs
 )
 
-from ..compressed import CompressedTensor
+from ..compressed import CompressedTensor, get_quant_cache
 
 import math
 
 import bitsandbytes
 
-from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group, quantize_1bit_with_srht, dequantize_1bit_with_srht
-from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim, quantize_ternary_with_srht, dequantize_ternary_with_srht
+from ..quant.one_bit import quantize_1bit, dequantize_1bit, quantize_1bit_group, dequantize_1bit_group
+from ..quant.ternary import quantize_ternary_group_lastdim, dequantize_ternary_group_lastdim
 from ..quant.two_bit import quantize_2bit_group, dequantize_2bit_group
 
 # CheckpointFunction 存储的是每层的 输入
+
+
+def _freeze_cache_value(value):
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze_cache_value(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_cache_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_cache_value(item) for item in value))
+    return value
+
+
+def _quant_cache_key(quant_method: str | None, compress_kwargs: dict | None) -> tuple:
+    kwargs_items = tuple(
+        sorted((key, _freeze_cache_value(value)) for key, value in (compress_kwargs or {}).items())
+    )
+    return quant_method, kwargs_items
+
+
+def _quantize_residual(tensor: Tensor, quant_method: str | None):
+    if quant_method == "1bit_pertensor":
+        return quantize_1bit(tensor)
+    if quant_method == "1bit_pergroupchannel":
+        return quantize_1bit_group(tensor, group_size=1)
+    if quant_method == "ternary":
+        return quantize_ternary_group_lastdim(tensor)
+    if quant_method == "two_bit_group":
+        return quantize_2bit_group(tensor, group_size=1)
+    raise ValueError(f"Unsupported quant_method: {quant_method}")
 
 
 def detach_variable(
@@ -91,16 +120,12 @@ def detach_variable_LowrankPlusQuantization(
         detached_hidden_states = reconstructed_R.detach()
         detached_hidden_states.requires_grad = True
     else:
-        if ctx.quant_method == 'uniform':
+        if ctx.quant_method == '1bit_pertensor':
             reconstructed_R = dequantize_1bit(ctx.packed_R, ctx.alpha, ctx.shape)
-        elif ctx.quant_method == 'group':
+        elif ctx.quant_method == '1bit_pergroupchannel':
             reconstructed_R = dequantize_1bit_group(ctx.packed_R, ctx.alpha, ctx.shape)
-        elif ctx.quant_method == 'srht+group':
-            reconstructed_R = dequantize_1bit_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
         elif ctx.quant_method == 'ternary':
             reconstructed_R = dequantize_ternary_group_lastdim(ctx.packed_R, ctx.alpha, ctx.shape)
-        elif ctx.quant_method == 'ternary+srht':
-            reconstructed_R = dequantize_ternary_with_srht(ctx.packed_R, ctx.alpha, ctx.shape)
         # reconstructed_R = 0
         detached_hidden_states = (hidden_states.reconstruct() + reconstructed_R).detach()
         detached_hidden_states.requires_grad = hidden_states.requires_grad
@@ -358,6 +383,8 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
 
         ctx.tensor_keys.append(None)
         if compress_kwargs is not None:
+            quant_cache = get_quant_cache()
+            cache_key = _quant_cache_key(quant_method, compress_kwargs)
             # LowRank = CompressedTensor(hidden_states, **compress_kwargs)
             # # Q, B = LowRank.factors
             # # R = hidden_states - (Q @ B)
@@ -381,33 +408,25 @@ class CheckpointFunction_LowrankPlusQuantization(torch.autograd.Function):
             # )
             # to_save.quant_state = quant_state
             # saved_tensors.append(to_save)
-            
-            
-            if quant_method == 'two_bit_group':
-                packed_R, alpha, shape = quantize_2bit_group(hidden_states, group_size=1)
-                
-                ctx.packed_R = packed_R
-                ctx.alpha = alpha
-                ctx.shape = shape
-                ctx.quant_method = quant_method
+
+            if hidden_states in quant_cache[cache_key]:
+                packed_R, alpha, shape = quant_cache[cache_key][hidden_states]
+                if quant_method != 'two_bit_group':
+                    saved_tensors.append(CompressedTensor(hidden_states, **compress_kwargs))
+            elif quant_method == 'two_bit_group':
+                packed_R, alpha, shape = _quantize_residual(hidden_states, quant_method)
+                quant_cache[cache_key][hidden_states] = (packed_R, alpha, shape)
             else:
-                LowRank = CompressedTensor(hidden_states, **compress_kwargs)
-                R = hidden_states - LowRank.reconstruct()
-                if quant_method == 'uniform':
-                    packed_R, alpha, shape = quantize_1bit(R)
-                elif quant_method == 'group':
-                    packed_R, alpha, shape = quantize_1bit_group(R, group_size=1)
-                elif quant_method == 'srht+group':
-                    packed_R, alpha, shape = quantize_1bit_with_srht(R)
-                elif quant_method == 'ternary':
-                    packed_R, alpha, shape = quantize_ternary_group_lastdim(R)
-                elif quant_method == 'ternary+srht':
-                    packed_R, alpha, shape = quantize_ternary_with_srht(R)
-                saved_tensors.append(LowRank)
-                ctx.packed_R = packed_R
-                ctx.alpha = alpha
-                ctx.shape = shape
-                ctx.quant_method = quant_method
+                lowrank = CompressedTensor(hidden_states, **compress_kwargs)
+                R = hidden_states - lowrank.reconstruct()
+                packed_R, alpha, shape = _quantize_residual(R, quant_method)
+                quant_cache[cache_key][hidden_states] = (packed_R, alpha, shape)
+                saved_tensors.append(lowrank)
+
+            ctx.packed_R = packed_R
+            ctx.alpha = alpha
+            ctx.shape = shape
+            ctx.quant_method = quant_method
         else:
             saved_tensors.append(hidden_states)
 

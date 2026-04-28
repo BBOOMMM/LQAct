@@ -9,75 +9,6 @@ from ..patch import _checkpoint_module, _patch_module
 import copy
 
 
-# def apply_patch_to_vit_model(
-#     model: "transformers.models.vit.modeling_vit.ViTPreTrainedModel",
-#     norm: bool = False,
-#     attn_in: bool = False,
-#     attn_out: bool = False,
-#     mlp_in: bool = False,
-#     mlp_out: bool = False,
-#     act_fn: bool = False,
-#     ckpt_attn: bool = False,
-#     ckpt_mlp: bool = False,
-#     ckpt_layer: bool = False,
-#     compress_kwargs: dict | None = None,
-# ) -> None:
-#     from transformers.models.vit.modeling_vit import ViTModel, ViTLayer
-#     base_model: ViTModel = model.base_model
-
-#     class CheckpointViTMLPWarning(UserWarning): ...
-#     warnings.simplefilter("once", CheckpointViTMLPWarning)
-
-#     for layer in base_model.encoder.layer:
-#         layer: ViTLayer
-#         if not compress_kwargs.get("lowrank_plus_quantization", False):
-#             if norm:
-#                 _patch_module(layer.layernorm_before, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
-#                 _patch_module(layer.layernorm_after, nn_layer_norm_forward, compress_kwargs=compress_kwargs)
-#             if attn_in:
-#                 _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=compress_kwargs)
-#                 _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=compress_kwargs)
-#                 _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if attn_out:
-#                 _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if mlp_in:
-#                 _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if mlp_out:
-#                 _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if act_fn:
-#                 _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_kwargs=compress_kwargs)
-#             if ckpt_attn:
-#                 _checkpoint_module(layer.attention, compress_kwargs=compress_kwargs)
-#             if ckpt_mlp:
-#                 warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
-#                 _checkpoint_module(layer.intermediate, compress_kwargs=compress_kwargs)
-#             if ckpt_layer:
-#                 _checkpoint_module(layer, compress_kwargs=compress_kwargs)
-#         else:
-#             if norm:
-#                 _patch_module(layer.layernorm_before, nn_layer_norm_forward_lowrank_plus_quantization, compress_kwargs=compress_kwargs)
-#                 _patch_module(layer.layernorm_after, nn_layer_norm_forward_lowrank_plus_quantization, compress_kwargs=compress_kwargs)
-#             if attn_in:
-#                 _patch_module(layer.attention.attention.query, nn_linear_forward, compress_kwargs=compress_kwargs)
-#                 _patch_module(layer.attention.attention.key, nn_linear_forward, compress_kwargs=compress_kwargs)
-#                 _patch_module(layer.attention.attention.value, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if attn_out:
-#                 _patch_module(layer.attention.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if mlp_in:
-#                 _patch_module(layer.intermediate.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if mlp_out:
-#                 _patch_module(layer.output.dense, nn_linear_forward, compress_kwargs=compress_kwargs)
-#             if act_fn:
-#                 _patch_module(layer.intermediate.intermediate_act_fn, gelu_forward, compress_kwargs=compress_kwargs)
-#             if ckpt_attn:
-#                 _checkpoint_module(layer.attention, compress_kwargs=compress_kwargs)
-#             if ckpt_mlp:
-#                 warnings.warn("ViT only supports checkpointing the first layer of MLP.", CheckpointViTMLPWarning)
-#                 _checkpoint_module(layer.intermediate, compress_kwargs=compress_kwargs)
-#             if ckpt_layer:
-#                 _checkpoint_module(layer, compress_kwargs=compress_kwargs)
-
-
 def apply_patch_to_vit_model(
     model: "transformers.models.vit.modeling_vit.ViTPreTrainedModel",
     norm: bool = False,
@@ -146,8 +77,8 @@ def apply_patch_to_vit_model(
         return
 
     
-    # if compress_kwargs.get("lowrank_plus_quantization", False):
-    if compress_method == "lowrank_plus_quantization":
+    # if compress_kwargs.get("dynamic_fixed_rank_dynamic_quantization", False):
+    if compress_method == "dynamic_fixed_rank_dynamic_quantization":
         for i in range(len(base_model.encoder.layer)):
             base_model.encoder.layer : ModuleList
             layer: ViTLayer = base_model.encoder.layer[i]

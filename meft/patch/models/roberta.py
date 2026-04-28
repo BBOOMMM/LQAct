@@ -24,7 +24,7 @@ def apply_patch_to_roberta_model(
     base_model: RobertaModel = model.base_model
     
     
-    if compress_method == "lowrank_plus_quantization":
+    if compress_method == "dynamic_fixed_rank_dynamic_quantization":
         for layer in base_model.encoder.layer:
             layer: RobertaLayer
             if norm:

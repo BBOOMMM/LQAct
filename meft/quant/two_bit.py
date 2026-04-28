@@ -226,7 +226,7 @@ def _unpack_2bit(packed: Tensor, d_pad: int) -> Tensor:
 
 def quantize_2bit_group(
     x: Tensor,
-    group_size: int = 128,
+    group_size: int = 1,
     eps: float = 0.0,
 ) -> Tuple[Tensor, Tensor, Any]:
     """
